@@ -15,9 +15,9 @@ use aionui_db::{
     Database, IAcpSessionRepository, IAgentMetadataRepository, IConversationRepository, IMcpServerRepository,
     IProjectStore, ISkillRepository, IUserOrderStore, IUserRepository, SqliteAcpSessionRepository,
     SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository,
-    SqliteAssistantPreferenceRepository, SqliteConversationRepository, SqliteMcpServerRepository, SqliteProjectStore,
-    SqliteProviderRepository, SqliteSettingsRepository, SqliteSkillRepository, SqliteUserOrderStore,
-    SqliteUserRepository,
+    SqliteAssistantPreferenceRepository, SqliteConversationRepository, SqliteMcpServerRepository,
+    SqliteOAuthTokenRepository, SqliteProjectStore, SqliteProviderRepository, SqliteSettingsRepository,
+    SqliteSkillRepository, SqliteUserOrderStore, SqliteUserRepository,
 };
 use aionui_project::ProjectService;
 use aionui_realtime::{BroadcastEventBus, WebSocketManager};
@@ -82,6 +82,10 @@ pub struct AppServices {
     pub skill_paths: Arc<aionui_extension::SkillPaths>,
     /// User skill metadata and import history repository.
     pub skill_repo: Arc<dyn ISkillRepository>,
+    /// Shared MCP OAuth service. The SAME instance backs the `/api/mcp/oauth/*`
+    /// routes, the connection test, and session builds, so a dynamically
+    /// registered OAuth client stays usable for refreshes across all of them.
+    pub mcp_oauth_service: aionui_mcp::McpOAuthService,
     backend_binary_path: Arc<PathBuf>,
     runtime_helper_bin: String,
     runtime_base_url: String,
@@ -256,6 +260,14 @@ impl AppServices {
         // so the agent gets the operator's tools (ELECTRON-1JG fix).
         let mcp_server_repo: Arc<dyn IMcpServerRepository> =
             Arc::new(SqliteMcpServerRepository::new(database.pool().clone()));
+        // Shared OAuth store for MCP servers. The `/api/mcp/oauth/*` routes, the
+        // connection test, and session builds must use ONE instance: dynamically
+        // registered client credentials are cached in-process and a refresh
+        // through a different instance would fall back to the static client id.
+        let mcp_oauth_service = aionui_mcp::McpOAuthService::new(
+            Arc::new(SqliteOAuthTokenRepository::new(database.pool().clone())),
+            reqwest::Client::new(),
+        );
 
         let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
             Arc::new(SqliteAgentMetadataRepository::new(database.pool().clone()));
@@ -369,6 +381,7 @@ impl AppServices {
             broadcaster: event_bus.clone(),
             backend_binary_path: backend_binary_path.clone(),
             mcp_server_repo: Some(mcp_server_repo),
+            mcp_oauth_service: Some(mcp_oauth_service.clone()),
             session_spawner,
             // agy cannot prompt for tool permission in headless mode, so AionUi
             // registers itself as its PreToolUse hook; the hook process calls
@@ -457,6 +470,7 @@ impl AppServices {
             app_version,
             skill_paths,
             skill_repo,
+            mcp_oauth_service,
             backend_binary_path,
             runtime_helper_bin,
             runtime_base_url,

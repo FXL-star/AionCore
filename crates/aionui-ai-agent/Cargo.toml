@@ -67,6 +67,7 @@ aionui-db.workspace = true
 aionui-process.workspace = true
 uuid.workspace = true
 sqlx.workspace = true
+reqwest.workspace = true
 
 # Integration tests under `tests/` need the `AgentInstance::Mock` variant.
 # Unlike unit tests (which see `cfg(test)` on the library), integration

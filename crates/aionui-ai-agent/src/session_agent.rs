@@ -1518,6 +1518,9 @@ pub struct SessionBuildInputs<'a> {
     /// User-configured MCP server repository (feature ELECTRON-1JG). `None` on
     /// paths that never inject MCP (tests) ⇒ no injection.
     pub mcp_server_repo: Option<&'a Arc<dyn IMcpServerRepository>>,
+    /// Shared MCP OAuth service. When present, HTTP/SSE servers get an
+    /// `Authorization: Bearer <token>` header at build time (never persisted).
+    pub mcp_oauth_service: Option<&'a aionui_mcp::McpOAuthService>,
     /// The conversation runtime context env (`AIONUI_USER_ID` /
     /// `AIONUI_CONVERSATION_ID` / `AIONUI_HELPER_BIN` / `AIONUI_BASE_URL` /
     /// `AIONUI_RUNTIME_TOKEN`, filled by `apply_conversation_runtime_context`).
@@ -1742,6 +1745,7 @@ pub async fn build_antigravity_instance(
         session_snapshot,
         backend_session_id,
         mcp_server_repo,
+        mcp_oauth_service,
         runtime_env,
         broadcaster,
         catalog_writeback,
@@ -1771,6 +1775,9 @@ pub async fn build_antigravity_instance(
         None => Vec::new(),
     };
     neutral.extend(config.session_mcp_servers.iter().cloned());
+    if let Some(oauth) = mcp_oauth_service {
+        crate::mcp_resolve::apply_oauth_to_neutral_servers(oauth, &user_id, &mut neutral).await;
+    }
     let mut mcp_servers: Vec<McpServerSpec> = neutral.iter().map(session_server_to_spec).collect();
     if let Some(cfg) = config.team_mcp_stdio_config.as_ref() {
         let mut coordination = vec![team_mcp_server_spec(cfg)];
@@ -1870,6 +1877,7 @@ pub async fn build_session_instance(
         session_snapshot,
         backend_session_id,
         mcp_server_repo,
+        mcp_oauth_service,
         runtime_env,
         broadcaster,
         catalog_writeback,
@@ -1910,6 +1918,9 @@ pub async fn build_session_instance(
             .filter(|server| server.name != TEAM_MCP_SERVER_NAME)
             .cloned(),
     );
+    if let Some(oauth) = mcp_oauth_service {
+        crate::mcp_resolve::apply_oauth_to_neutral_servers(oauth, &user_id, &mut neutral).await;
+    }
     let mut mcp_servers: Vec<McpServerSpec> = neutral.iter().map(session_server_to_spec).collect();
     if let Some(cfg) = config.team_mcp_stdio_config.as_ref() {
         // Team-MCP is PREPENDED before the user's servers (clean-slate + legacy
@@ -5018,6 +5029,7 @@ mod build_mapping_tests {
                 session_snapshot: None,
                 backend_session_id: None,
                 mcp_server_repo: Some(&repo),
+                mcp_oauth_service: None,
                 runtime_env: &[],
                 broadcaster,
                 catalog_writeback: None,

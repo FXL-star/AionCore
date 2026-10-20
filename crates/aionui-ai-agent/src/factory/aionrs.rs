@@ -114,6 +114,10 @@ pub(super) async fn build(
     )
     .await;
 
+    if let Some(oauth) = deps.mcp_oauth_service.as_ref() {
+        apply_oauth_to_mcp_configs(oauth, &ctx.user_id, &mut extra_mcp_servers).await;
+    }
+
     if !extra_mcp_servers.is_empty() {
         info!(
             conversation_id = %ctx.conversation_id,
@@ -818,6 +822,29 @@ async fn merge_session_snapshot_mcp_servers(
     }
 }
 
+/// Attach a stored MCP OAuth token to aionrs HTTP/SSE server configs.
+///
+/// Runs on the FINAL merged map at session-build time (repo rows + inline
+/// snapshot), never on configs that get persisted back into conversation
+/// metadata. Stdio has no headers; an explicit user `authorization` header wins.
+async fn apply_oauth_to_mcp_configs(
+    oauth: &aionui_mcp::McpOAuthService,
+    user_id: &str,
+    servers: &mut HashMap<String, McpServerConfig>,
+) {
+    for config in servers.values_mut() {
+        if !matches!(&config.transport, TransportType::StreamableHttp | TransportType::Sse) {
+            continue;
+        }
+        let Some(url) = config.url.as_deref() else {
+            continue;
+        };
+        let mut headers = config.headers.take().unwrap_or_default();
+        oauth.apply_authorization(user_id, url, &mut headers).await;
+        config.headers = Some(headers);
+    }
+}
+
 async fn ensure_stdio_launch(
     command: &str,
     args: &[String],
@@ -1111,6 +1138,106 @@ mod tests {
 
         assert!(extra_mcp_servers.contains_key("mcp-docs"));
         assert_eq!(extra_mcp_servers["mcp-docs"].transport, TransportType::StreamableHttp);
+    }
+
+    // -- apply_oauth_to_mcp_configs ------------------------------------------
+
+    /// Hands out `stored_token` for every URL.
+    struct StoredTokenRepo;
+
+    #[async_trait::async_trait]
+    impl aionui_db::IOAuthTokenRepository for StoredTokenRepo {
+        async fn get_by_url(
+            &self,
+            user_id: &str,
+            server_url: &str,
+        ) -> Result<Option<aionui_db::models::OAuthTokenRow>, aionui_db::DbError> {
+            Ok(Some(aionui_db::models::OAuthTokenRow {
+                user_id: user_id.to_owned(),
+                server_url: server_url.to_owned(),
+                access_token: "stored_token".to_owned(),
+                refresh_token: None,
+                token_type: "bearer".to_owned(),
+                expires_at: Some(aionui_common::now_ms() + 3_600_000),
+                created_at: 0,
+                updated_at: 0,
+            }))
+        }
+
+        async fn upsert(
+            &self,
+            _: aionui_db::UpsertOAuthTokenParams<'_>,
+        ) -> Result<aionui_db::models::OAuthTokenRow, aionui_db::DbError> {
+            unimplemented!("not needed")
+        }
+
+        async fn delete(&self, _: &str, _: &str) -> Result<(), aionui_db::DbError> {
+            Ok(())
+        }
+
+        async fn list_authenticated_urls(&self, _: &str) -> Result<Vec<String>, aionui_db::DbError> {
+            Ok(vec![])
+        }
+    }
+
+    fn mcp_config(
+        transport: TransportType,
+        url: Option<&str>,
+        headers: Option<HashMap<String, String>>,
+    ) -> McpServerConfig {
+        McpServerConfig {
+            transport,
+            command: None,
+            args: None,
+            env: None,
+            url: url.map(ToOwned::to_owned),
+            headers,
+            deferred: Some(false),
+            startup_timeout_ms: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_is_applied_to_http_and_sse_configs_but_not_stdio() {
+        let oauth = aionui_mcp::McpOAuthService::new(Arc::new(StoredTokenRepo), reqwest::Client::new());
+        let mut servers = HashMap::from([
+            (
+                "http".to_owned(),
+                mcp_config(
+                    TransportType::StreamableHttp,
+                    Some("https://mcp.example.com/http"),
+                    Some(HashMap::new()),
+                ),
+            ),
+            (
+                "sse".to_owned(),
+                mcp_config(
+                    TransportType::Sse,
+                    Some("https://mcp.example.com/sse"),
+                    Some(HashMap::from([(
+                        "authorization".to_owned(),
+                        "Token user-owned".to_owned(),
+                    )])),
+                ),
+            ),
+            ("stdio".to_owned(), mcp_config(TransportType::Stdio, None, None)),
+        ]);
+
+        apply_oauth_to_mcp_configs(&oauth, TEST_USER_ID, &mut servers).await;
+
+        let http_headers = servers["http"].headers.as_ref().expect("http headers");
+        assert_eq!(
+            http_headers.get("Authorization").map(String::as_str),
+            Some("Bearer stored_token")
+        );
+        // A user-supplied header wins over the stored token.
+        let sse_headers = servers["sse"].headers.as_ref().expect("sse headers");
+        assert_eq!(sse_headers.len(), 1);
+        assert_eq!(
+            sse_headers.get("authorization").map(String::as_str),
+            Some("Token user-owned")
+        );
+        assert!(servers["stdio"].headers.is_none());
     }
 
     #[cfg(unix)]

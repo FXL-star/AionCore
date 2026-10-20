@@ -41,6 +41,10 @@ pub struct AgentFactoryDeps {
     /// inject enabled servers into `session/new` (ELECTRON-1JG fix).
     /// `None` for tests/composition paths that do not need MCP injection.
     pub mcp_server_repo: Option<Arc<dyn IMcpServerRepository>>,
+    /// Shared MCP OAuth service (same instance as the `/api/mcp/oauth/*`
+    /// routes). Used to attach stored bearer tokens to HTTP/SSE MCP servers at
+    /// session-build time. `None` for tests/composition paths without OAuth.
+    pub mcp_oauth_service: Option<aionui_mcp::McpOAuthService>,
     /// Subprocess spawner for the clean-slate session model. claude/codex always
     /// run through `SessionAgentTask` (direct-CLI) instead of the ACP manager, so
     /// the spawner is unconditionally wired — there is no fallback to the ACP path.

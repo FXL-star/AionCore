@@ -31,6 +31,10 @@ const DEFAULT_CLIENT_ID: &str = "aionui";
 /// Token expiry safety margin (refresh 5 minutes before expiration).
 const EXPIRY_MARGIN_MS: i64 = 5 * 60 * 1000;
 
+/// Upper bound for one token lookup (including a refresh round-trip) while
+/// assembling a request. A slow auth server must not block session start.
+const AUTHORIZATION_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 // ---------------------------------------------------------------------------
 // Pending login state
 // ---------------------------------------------------------------------------
@@ -45,6 +49,10 @@ struct PendingLogin {
     auth_url: String,
     token_url: String,
     redirect_url: String,
+    /// RFC 8707 resource indicator (canonical MCP server URI). MCP 2025-06-18
+    /// requires it in both the authorization and the token request, so the
+    /// exchange reuses exactly the value the browser saw.
+    resource: Option<String>,
     /// Credentials the authorize request was made with. The token exchange must
     /// reuse exactly these — a dynamically registered client_id differs per
     /// server and per registration.
@@ -198,6 +206,32 @@ impl McpOAuthService {
         Ok(Some(row.access_token))
     }
 
+    /// Add `Authorization: Bearer <token>` for `server_url` when a token is stored.
+    ///
+    /// Best effort: an existing `Authorization` header (any casing) always wins,
+    /// and DB errors/timeouts are logged and ignored — a session must still start.
+    /// Never logs the token or the resulting header value.
+    pub async fn apply_authorization(&self, user_id: &str, server_url: &str, headers: &mut HashMap<String, String>) {
+        if headers.keys().any(|key| key.eq_ignore_ascii_case("authorization")) {
+            return;
+        }
+        match tokio::time::timeout(AUTHORIZATION_LOOKUP_TIMEOUT, self.get_token(user_id, server_url)).await {
+            Ok(Ok(Some(token))) => {
+                debug!(server_url, "Attached stored OAuth token to MCP request headers");
+                headers.insert("Authorization".to_owned(), format!("Bearer {token}"));
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => {
+                warn!(server_url, error = %error, "OAuth token lookup failed; continuing without Authorization")
+            }
+            Err(_) => warn!(
+                server_url,
+                timeout_secs = AUTHORIZATION_LOOKUP_TIMEOUT.as_secs(),
+                "OAuth token lookup timed out; continuing without Authorization"
+            ),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
@@ -241,10 +275,16 @@ impl McpOAuthService {
 
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
-        let (authorize_url, csrf_token) = client
+        // RFC 8707 / MCP 2025-06-18: bind the requested token to this MCP
+        // server by sending `resource` on the authorization request.
+        let resource = Self::resource_indicator(server_url);
+        let mut authorize_request = client
             .authorize_url(CsrfToken::new_random)
-            .set_pkce_challenge(pkce_challenge)
-            .url();
+            .set_pkce_challenge(pkce_challenge);
+        if let Some(resource) = resource.as_deref() {
+            authorize_request = authorize_request.add_extra_param("resource", resource);
+        }
+        let (authorize_url, csrf_token) = authorize_request.url();
 
         {
             let mut pending = self.pending.lock().await;
@@ -257,6 +297,7 @@ impl McpOAuthService {
                     auth_url: auth_url_str,
                     token_url: token_url_str,
                     redirect_url: redirect_url_str,
+                    resource,
                     credentials,
                 },
             );
@@ -406,6 +447,28 @@ impl McpOAuthService {
         Ok((code, state))
     }
 
+    /// Build the RFC 8707 resource indicator for an MCP server URL.
+    ///
+    /// MCP 2025-06-18 requires the `resource` parameter on both the
+    /// authorization and token requests. Its value is an absolute URI with no
+    /// fragment (RFC 8707 §2) and no query (the RFC 9728 resource-identifier
+    /// form); `Url` normalizes scheme/host case, and a bare origin drops its
+    /// trailing slash per the MCP canonical-URI guidance. Returns `None` when
+    /// `server_url` is not an absolute http(s) URL.
+    fn resource_indicator(server_url: &str) -> Option<String> {
+        let mut url = url::Url::parse(server_url).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        url.set_fragment(None);
+        url.set_query(None);
+        let mut resource = url.to_string();
+        if url.path() == "/" {
+            resource.pop();
+        }
+        Some(resource)
+    }
+
     /// Build a no-redirect reqwest client for OAuth token exchange.
     fn build_no_redirect_client() -> Result<reqwest::Client, McpError> {
         reqwest::ClientBuilder::new()
@@ -422,7 +485,7 @@ impl McpOAuthService {
         code: String,
         state: String,
     ) -> Result<(), McpError> {
-        let (auth_url_str, token_url_str, redirect_url_str, pkce_verifier, credentials) = {
+        let (auth_url_str, token_url_str, redirect_url_str, pkce_verifier, credentials, resource) = {
             let mut guard = self.pending.lock().await;
             let pending = guard
                 .remove(&(user_id.to_string(), state))
@@ -433,6 +496,7 @@ impl McpOAuthService {
                 pending.redirect_url,
                 pending.pkce_verifier,
                 pending.credentials,
+                pending.resource,
             )
         };
 
@@ -451,9 +515,15 @@ impl McpOAuthService {
 
         let http_client = Self::build_no_redirect_client()?;
 
-        let token_result = client
+        let mut token_request = client
             .exchange_code(AuthorizationCode::new(code))
-            .set_pkce_verifier(pkce_verifier)
+            .set_pkce_verifier(pkce_verifier);
+        if let Some(resource) = resource.as_deref() {
+            // Must match the authorization request (MCP 2025-06-18), otherwise
+            // the issued token is not audience-bound to this MCP server.
+            token_request = token_request.add_extra_param("resource", resource);
+        }
+        let token_result = token_request
             .request_async(&http_client)
             .await
             .map_err(|e| McpError::OAuth(format!("Token exchange failed: {e}")))?;
@@ -483,8 +553,13 @@ impl McpOAuthService {
         let http_client = Self::build_no_redirect_client()?;
 
         let refresh_token = RefreshToken::new(refresh_token_value.to_string());
-        let token_result = client
-            .exchange_refresh_token(&refresh_token)
+        let mut token_request = client.exchange_refresh_token(&refresh_token);
+        if let Some(resource) = Self::resource_indicator(server_url) {
+            // A refresh is an access-token request too: keep the RFC 8707
+            // resource indicator so the new token stays audience-bound.
+            token_request = token_request.add_extra_param("resource", resource);
+        }
+        let token_result = token_request
             .request_async(&http_client)
             .await
             .map_err(|e| McpError::OAuth(format!("Token refresh failed: {e}")))?;
@@ -734,6 +809,16 @@ mod tests {
     // -- Mock repositories ---------------------------------------------------
 
     async fn insert_pending_login(svc: &McpOAuthService, user_id: &str, state: &str) {
+        insert_pending_login_detailed(svc, user_id, state, "https://auth.example.com/token", None).await;
+    }
+
+    async fn insert_pending_login_detailed(
+        svc: &McpOAuthService,
+        user_id: &str,
+        state: &str,
+        token_url: &str,
+        resource: Option<String>,
+    ) {
         let (_, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let mut pending = svc.pending.lock().await;
         pending.insert(
@@ -742,8 +827,9 @@ mod tests {
                 csrf_token: CsrfToken::new(state.to_string()),
                 pkce_verifier,
                 auth_url: "https://auth.example.com/authorize".to_string(),
-                token_url: "https://auth.example.com/token".to_string(),
+                token_url: token_url.to_string(),
                 redirect_url: "http://127.0.0.1/callback".to_string(),
+                resource,
                 credentials: ClientCredentials {
                     client_id: DEFAULT_CLIENT_ID.to_string(),
                     client_secret: None,
@@ -921,6 +1007,149 @@ mod tests {
         }
     }
 
+    /// Every lookup fails — used to prove header injection degrades quietly.
+    struct FailingTokenRepo;
+
+    #[async_trait::async_trait]
+    impl IOAuthTokenRepository for FailingTokenRepo {
+        async fn get_by_url(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<aionui_db::models::OAuthTokenRow>, aionui_db::DbError> {
+            Err(aionui_db::DbError::Init("db unavailable".into()))
+        }
+
+        async fn upsert(
+            &self,
+            _: UpsertOAuthTokenParams<'_>,
+        ) -> Result<aionui_db::models::OAuthTokenRow, aionui_db::DbError> {
+            unimplemented!()
+        }
+
+        async fn delete(&self, _: &str, _: &str) -> Result<(), aionui_db::DbError> {
+            Ok(())
+        }
+
+        async fn list_authenticated_urls(&self, _: &str) -> Result<Vec<String>, aionui_db::DbError> {
+            Ok(vec![])
+        }
+    }
+
+    /// Accepts and returns every upsert — enough for refresh/exchange tests.
+    struct AcceptingTokenRepo;
+
+    #[async_trait::async_trait]
+    impl IOAuthTokenRepository for AcceptingTokenRepo {
+        async fn get_by_url(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<aionui_db::models::OAuthTokenRow>, aionui_db::DbError> {
+            Ok(None)
+        }
+
+        async fn upsert(
+            &self,
+            params: UpsertOAuthTokenParams<'_>,
+        ) -> Result<aionui_db::models::OAuthTokenRow, aionui_db::DbError> {
+            Ok(aionui_db::models::OAuthTokenRow {
+                user_id: params.user_id.to_string(),
+                server_url: params.server_url.to_string(),
+                access_token: params.access_token.to_string(),
+                refresh_token: params.refresh_token.map(str::to_string),
+                token_type: params.token_type.to_string(),
+                expires_at: params.expires_at,
+                created_at: 0,
+                updated_at: 0,
+            })
+        }
+
+        async fn delete(&self, _: &str, _: &str) -> Result<(), aionui_db::DbError> {
+            Ok(())
+        }
+
+        async fn list_authenticated_urls(&self, _: &str) -> Result<Vec<String>, aionui_db::DbError> {
+            Ok(vec![])
+        }
+    }
+
+    /// Minimal local authorization server: metadata + token endpoint. Records
+    /// every token request body so tests can assert the parameters sent.
+    struct MockAuthServer {
+        base_url: String,
+        token_bodies: Arc<Mutex<Vec<String>>>,
+        _handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl MockAuthServer {
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let token_bodies = Arc::new(Mutex::new(Vec::new()));
+
+            let metadata_base = base_url.clone();
+            let bodies = token_bodies.clone();
+            let app = axum::Router::new()
+                .route(
+                    "/.well-known/oauth-authorization-server",
+                    axum::routing::get(move || {
+                        let base = metadata_base.clone();
+                        async move {
+                            axum::Json(serde_json::json!({
+                                "authorization_endpoint": format!("{base}/authorize"),
+                                "token_endpoint": format!("{base}/token"),
+                            }))
+                        }
+                    }),
+                )
+                .route(
+                    "/token",
+                    axum::routing::post(move |body: String| {
+                        let bodies = bodies.clone();
+                        async move {
+                            bodies.lock().await.push(body);
+                            axum::Json(serde_json::json!({
+                                "access_token": "fresh_access_token",
+                                "token_type": "Bearer",
+                                "expires_in": 3600,
+                            }))
+                        }
+                    }),
+                );
+
+            let handle = tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+
+            Self {
+                base_url,
+                token_bodies,
+                _handle: handle,
+            }
+        }
+
+        fn server_url(&self) -> String {
+            format!("{}/mcp", self.base_url)
+        }
+
+        async fn last_token_body(&self) -> String {
+            self.token_bodies
+                .lock()
+                .await
+                .last()
+                .cloned()
+                .expect("expected a token request")
+        }
+    }
+
+    /// Assert the form-encoded token body carries `resource=<expected>`.
+    fn assert_form_resource(body: &str, expected: &str) {
+        let resource = url::form_urlencoded::parse(body.as_bytes())
+            .find(|(key, _)| key == "resource")
+            .map(|(_, value)| value.into_owned());
+        assert_eq!(resource.as_deref(), Some(expected), "token request body: {body}");
+    }
     // -- Service behavior tests ----------------------------------------------
 
     #[tokio::test]
@@ -1005,5 +1234,131 @@ mod tests {
         // Expired token with no refresh_token: returns the expired token as-is.
         let token = svc.get_token(TEST_USER_ID, "https://example.com").await.unwrap();
         assert_eq!(token.as_deref(), Some("expired_token"));
+    }
+
+    // -- apply_authorization -------------------------------------------------
+
+    #[tokio::test]
+    async fn apply_authorization_adds_bearer_header() {
+        let svc = McpOAuthService::new(Arc::new(ValidTokenRepo), reqwest::Client::new());
+        let mut headers = HashMap::new();
+        svc.apply_authorization(TEST_USER_ID, "https://example.com", &mut headers)
+            .await;
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer valid_access_token")
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_authorization_keeps_a_user_supplied_header() {
+        let svc = McpOAuthService::new(Arc::new(ValidTokenRepo), reqwest::Client::new());
+        // Header names are case-insensitive on the wire, so a lowercase
+        // `authorization` must still win over the stored token.
+        let mut headers = HashMap::from([("authorization".to_string(), "Token mine".to_string())]);
+        svc.apply_authorization(TEST_USER_ID, "https://example.com", &mut headers)
+            .await;
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.get("authorization").map(String::as_str), Some("Token mine"));
+    }
+
+    #[tokio::test]
+    async fn apply_authorization_no_token_leaves_headers_untouched() {
+        let svc = McpOAuthService::new(Arc::new(MockTokenRepo), reqwest::Client::new());
+        let mut headers = HashMap::from([("X-Custom".to_string(), "1".to_string())]);
+        svc.apply_authorization(TEST_USER_ID, "https://example.com", &mut headers)
+            .await;
+        assert_eq!(headers, HashMap::from([("X-Custom".to_string(), "1".to_string())]));
+    }
+
+    #[tokio::test]
+    async fn apply_authorization_repo_error_is_not_fatal() {
+        let svc = McpOAuthService::new(Arc::new(FailingTokenRepo), reqwest::Client::new());
+        let mut headers = HashMap::new();
+        svc.apply_authorization(TEST_USER_ID, "https://example.com", &mut headers)
+            .await;
+        assert!(headers.is_empty());
+    }
+
+    // -- RFC 8707 resource indicator -----------------------------------------
+
+    #[test]
+    fn resource_indicator_is_canonical() {
+        // Scheme and host are lowercased, fragment/query dropped.
+        assert_eq!(
+            McpOAuthService::resource_indicator("HTTPS://MCP.Example.COM/mcp?x=1#frag").as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+        // A bare origin loses its trailing slash.
+        assert_eq!(
+            McpOAuthService::resource_indicator("https://mcp.example.com/").as_deref(),
+            Some("https://mcp.example.com")
+        );
+        // Paths are preserved as-is.
+        assert_eq!(
+            McpOAuthService::resource_indicator("https://mcp.example.com/server/mcp").as_deref(),
+            Some("https://mcp.example.com/server/mcp")
+        );
+        // Not an absolute http(s) URI: omitted rather than guessed.
+        assert_eq!(McpOAuthService::resource_indicator("mcp.example.com"), None);
+        assert_eq!(McpOAuthService::resource_indicator("ftp://mcp.example.com"), None);
+    }
+
+    /// HTTP client for tests that talk to a loopback mock server. Bypasses
+    /// system proxies (`no_proxy`): a CI/dev machine may export `HTTP_PROXY`
+    /// without `NO_PROXY`, which makes loopback discovery flaky.
+    fn test_http_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn authorization_request_carries_resource_indicator() {
+        let server = MockAuthServer::start().await;
+        let svc = McpOAuthService::new(Arc::new(AcceptingTokenRepo), test_http_client());
+        let server_url = server.server_url();
+
+        let (authorize_url, _listener) = svc.prepare_login_flow(TEST_USER_ID, &server_url).await.unwrap();
+
+        let parsed = url::Url::parse(&authorize_url).unwrap();
+        let resource = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "resource")
+            .map(|(_, value)| value.into_owned());
+        assert_eq!(resource.as_deref(), Some(server_url.as_str()));
+    }
+
+    #[tokio::test]
+    async fn token_exchange_carries_resource_indicator() {
+        let server = MockAuthServer::start().await;
+        let svc = McpOAuthService::new(Arc::new(AcceptingTokenRepo), test_http_client());
+        let server_url = server.server_url();
+        let token_url = format!("{}/token", server.base_url);
+        insert_pending_login_detailed(&svc, TEST_USER_ID, "state-1", &token_url, Some(server_url.clone())).await;
+
+        svc.exchange_code(
+            TEST_USER_ID,
+            &server_url,
+            "auth-code".to_string(),
+            "state-1".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_form_resource(&server.last_token_body().await, &server_url);
+    }
+
+    #[tokio::test]
+    async fn refresh_request_carries_resource_indicator() {
+        let server = MockAuthServer::start().await;
+        let svc = McpOAuthService::new(Arc::new(AcceptingTokenRepo), test_http_client());
+        let server_url = server.server_url();
+
+        let token = svc
+            .refresh_token(TEST_USER_ID, &server_url, "old-refresh-token")
+            .await
+            .unwrap();
+
+        assert_eq!(token, "fresh_access_token");
+        assert_form_resource(&server.last_token_body().await, &server_url);
     }
 }

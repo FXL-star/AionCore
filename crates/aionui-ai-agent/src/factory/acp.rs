@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::agent_task::AgentInstance;
@@ -132,6 +133,7 @@ pub(super) async fn build(
                 session_snapshot: build_context.session_snapshot.as_ref(),
                 backend_session_id: build_context.session_id.clone(),
                 mcp_server_repo: deps.mcp_server_repo.as_ref(),
+                mcp_oauth_service: deps.mcp_oauth_service.as_ref(),
                 // The AIONUI_* conversation runtime context the legacy path
                 // injects via apply_acp_launch_policy — forwarded into
                 // SessionConfig.spawn_env so direct-CLI spawns get it too.
@@ -263,6 +265,10 @@ pub(super) async fn build(
                 );
             }
         }
+    }
+
+    if let Some(oauth) = deps.mcp_oauth_service.as_ref() {
+        apply_oauth_to_sdk_servers(oauth, &ctx.user_id, &mut session_mcp_servers).await;
     }
 
     let params = Arc::new(
@@ -547,6 +553,47 @@ fn parse_headers(value: Option<&serde_json::Value>) -> Vec<HttpHeader> {
         .iter()
         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
         .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.into_iter().map(|(k, v)| HttpHeader::new(k, v)).collect()
+}
+
+/// Attach a stored MCP OAuth token to SDK-shaped servers.
+///
+/// Runs on the FINAL list at session-build time (repo rows + conversation
+/// snapshot), never on rows that may be persisted back into conversation
+/// metadata. Only HTTP/SSE transports carry headers; stdio is untouched and an
+/// explicit user `authorization` header always wins.
+async fn apply_oauth_to_sdk_servers(oauth: &aionui_mcp::McpOAuthService, user_id: &str, servers: &mut [McpServer]) {
+    for server in servers.iter_mut() {
+        let (is_sse, name, url, mut headers) = match server {
+            McpServer::Http(http) => (
+                false,
+                http.name.clone(),
+                http.url.clone(),
+                headers_to_map(&http.headers),
+            ),
+            McpServer::Sse(sse) => (true, sse.name.clone(), sse.url.clone(), headers_to_map(&sse.headers)),
+            _ => continue,
+        };
+        oauth.apply_authorization(user_id, &url, &mut headers).await;
+        let headers = map_to_headers(headers);
+        *server = if is_sse {
+            McpServer::Sse(McpServerSse::new(name, url).headers(headers))
+        } else {
+            McpServer::Http(McpServerHttp::new(name, url).headers(headers))
+        };
+    }
+}
+
+fn headers_to_map(headers: &[HttpHeader]) -> HashMap<String, String> {
+    headers
+        .iter()
+        .map(|header| (header.name.clone(), header.value.clone()))
+        .collect()
+}
+
+fn map_to_headers(headers: HashMap<String, String>) -> Vec<HttpHeader> {
+    let mut entries: Vec<(String, String)> = headers.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries.into_iter().map(|(k, v)| HttpHeader::new(k, v)).collect()
 }
@@ -1049,6 +1096,86 @@ mod tests {
     async fn row_to_sdk_stdio_missing_command_errors() {
         let row = make_row("bad", "stdio", r#"{"args":[]}"#, true, false);
         assert!(row_to_sdk_mcp_server(&row).await.is_err());
+    }
+
+    // -- apply_oauth_to_sdk_servers ------------------------------------------
+
+    /// Hands out `stored_token` for every URL.
+    struct StoredTokenRepo;
+
+    #[async_trait]
+    impl aionui_db::IOAuthTokenRepository for StoredTokenRepo {
+        async fn get_by_url(
+            &self,
+            user_id: &str,
+            server_url: &str,
+        ) -> Result<Option<aionui_db::models::OAuthTokenRow>, aionui_db::DbError> {
+            Ok(Some(aionui_db::models::OAuthTokenRow {
+                user_id: user_id.to_owned(),
+                server_url: server_url.to_owned(),
+                access_token: "stored_token".to_owned(),
+                refresh_token: None,
+                token_type: "bearer".to_owned(),
+                expires_at: Some(aionui_common::now_ms() + 3_600_000),
+                created_at: 0,
+                updated_at: 0,
+            }))
+        }
+
+        async fn upsert(
+            &self,
+            _: aionui_db::UpsertOAuthTokenParams<'_>,
+        ) -> Result<aionui_db::models::OAuthTokenRow, aionui_db::DbError> {
+            unimplemented!("not needed")
+        }
+
+        async fn delete(&self, _: &str, _: &str) -> Result<(), aionui_db::DbError> {
+            Ok(())
+        }
+
+        async fn list_authenticated_urls(&self, _: &str) -> Result<Vec<String>, aionui_db::DbError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_header_is_added_to_http_and_sse_servers() {
+        let oauth = aionui_mcp::McpOAuthService::new(Arc::new(StoredTokenRepo), reqwest::Client::new());
+        let mut servers = vec![
+            McpServer::Http(McpServerHttp::new("http", "https://example.com/http").headers(Vec::new())),
+            McpServer::Sse(McpServerSse::new("sse", "https://example.com/sse").headers(Vec::new())),
+        ];
+
+        apply_oauth_to_sdk_servers(&oauth, "user-1", &mut servers).await;
+
+        match (&servers[0], &servers[1]) {
+            (McpServer::Http(http), McpServer::Sse(sse)) => {
+                assert_eq!(http.headers.len(), 1);
+                assert_eq!(http.headers[0].name, "Authorization");
+                assert_eq!(http.headers[0].value, "Bearer stored_token");
+                assert_eq!(sse.headers.len(), 1);
+                assert_eq!(sse.headers[0].value, "Bearer stored_token");
+            }
+            other => panic!("unexpected servers: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_header_keeps_a_user_supplied_authorization() {
+        let oauth = aionui_mcp::McpOAuthService::new(Arc::new(StoredTokenRepo), reqwest::Client::new());
+        let mut servers = vec![McpServer::Http(
+            McpServerHttp::new("http", "https://example.com/http")
+                .headers(vec![HttpHeader::new("authorization", "Token user-owned")]),
+        )];
+
+        apply_oauth_to_sdk_servers(&oauth, "user-1", &mut servers).await;
+
+        let McpServer::Http(http) = &servers[0] else {
+            panic!("expected Http");
+        };
+        assert_eq!(http.headers.len(), 1);
+        assert_eq!(http.headers[0].name, "authorization");
+        assert_eq!(http.headers[0].value, "Token user-owned");
     }
 
     // -- load_user_mcp_servers integration -----------------------------------

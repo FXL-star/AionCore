@@ -206,7 +206,16 @@ async fn test_connection(
     body: Result<Json<TestMcpConnectionRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    let transport = McpServerTransport::from(req.transport);
+    let mut transport = McpServerTransport::from(req.transport);
+    // The server may have completed an OAuth login since it was configured;
+    // attach the stored token so a protected endpoint is tested with the same
+    // credentials a session would use.
+    match &mut transport {
+        McpServerTransport::Http { url, headers } | McpServerTransport::Sse { url, headers } => {
+            state.oauth_service.apply_authorization(&user.id, url, headers).await;
+        }
+        McpServerTransport::Stdio { .. } => {}
+    }
     let result = state
         .connection_test_service
         .test_connection_with_runtime_scope(

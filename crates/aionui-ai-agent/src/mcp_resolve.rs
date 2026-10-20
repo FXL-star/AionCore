@@ -17,6 +17,7 @@ use std::sync::Arc;
 use aionui_api_types::{SessionMcpServer, SessionMcpTransport, TEAM_MCP_SERVER_NAME};
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
+use aionui_mcp::McpOAuthService;
 use aionui_realtime::EventBroadcaster;
 use aionui_runtime::ensure_runtime_command;
 use tracing::{info, warn};
@@ -85,6 +86,23 @@ pub async fn resolve_session_mcp_servers(
         );
     }
     servers
+}
+
+/// Apply stored MCP OAuth credentials to neutral servers.
+///
+/// Only HTTP/SSE transports carry headers; stdio is untouched. Call this on the
+/// FINAL merged list (repo-backed + session snapshot) at session-build time —
+/// never on rows that may be persisted back into conversation metadata.
+pub async fn apply_oauth_to_neutral_servers(oauth: &McpOAuthService, user_id: &str, servers: &mut [SessionMcpServer]) {
+    for server in servers.iter_mut() {
+        let (url, headers) = match &mut server.transport {
+            SessionMcpTransport::Http { url, headers }
+            | SessionMcpTransport::StreamableHttp { url, headers }
+            | SessionMcpTransport::Sse { url, headers } => (url.as_str(), headers),
+            SessionMcpTransport::Stdio { .. } => continue,
+        };
+        oauth.apply_authorization(user_id, url, headers).await;
+    }
 }
 
 /// Parse one `McpServerRow` into a neutral `SessionMcpServer`, resolving the stdio
@@ -324,5 +342,118 @@ mod tests {
         let servers = resolve_session_mcp_servers(&repo, TEST_USER_ID, None, "conv-1", test_broadcaster()).await;
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "docs");
+    }
+
+    /// A token store that hands out `stored_token` for any URL.
+    struct StoredTokenRepo;
+
+    #[async_trait::async_trait]
+    impl aionui_db::IOAuthTokenRepository for StoredTokenRepo {
+        async fn get_by_url(
+            &self,
+            user_id: &str,
+            server_url: &str,
+        ) -> Result<Option<aionui_db::models::OAuthTokenRow>, aionui_db::DbError> {
+            Ok(Some(aionui_db::models::OAuthTokenRow {
+                user_id: user_id.to_owned(),
+                server_url: server_url.to_owned(),
+                access_token: "stored_token".to_owned(),
+                refresh_token: None,
+                token_type: "bearer".to_owned(),
+                // Far future: no refresh round-trip in these tests.
+                expires_at: Some(aionui_common::now_ms() + 3_600_000),
+                created_at: 0,
+                updated_at: 0,
+            }))
+        }
+
+        async fn upsert(
+            &self,
+            _: aionui_db::UpsertOAuthTokenParams<'_>,
+        ) -> Result<aionui_db::models::OAuthTokenRow, aionui_db::DbError> {
+            unimplemented!("not needed")
+        }
+
+        async fn delete(&self, _: &str, _: &str) -> Result<(), aionui_db::DbError> {
+            Ok(())
+        }
+
+        async fn list_authenticated_urls(&self, _: &str) -> Result<Vec<String>, aionui_db::DbError> {
+            Ok(vec![])
+        }
+    }
+
+    fn oauth_with_stored_token() -> McpOAuthService {
+        McpOAuthService::new(Arc::new(StoredTokenRepo), reqwest::Client::new())
+    }
+
+    #[tokio::test]
+    async fn oauth_is_applied_to_http_and_sse_but_not_stdio() {
+        let oauth = oauth_with_stored_token();
+        let mut servers = vec![
+            SessionMcpServer {
+                id: "http".into(),
+                name: "http".into(),
+                transport: SessionMcpTransport::StreamableHttp {
+                    url: "https://mcp.example.com/http".into(),
+                    headers: std::collections::HashMap::new(),
+                },
+            },
+            SessionMcpServer {
+                id: "sse".into(),
+                name: "sse".into(),
+                transport: SessionMcpTransport::Sse {
+                    url: "https://mcp.example.com/sse".into(),
+                    headers: std::collections::HashMap::new(),
+                },
+            },
+            SessionMcpServer {
+                id: "stdio".into(),
+                name: "stdio".into(),
+                transport: SessionMcpTransport::Stdio {
+                    command: "/bin/true".into(),
+                    args: Vec::new(),
+                    env: std::collections::HashMap::new(),
+                },
+            },
+        ];
+
+        apply_oauth_to_neutral_servers(&oauth, TEST_USER_ID, &mut servers).await;
+
+        let expected = Some("Bearer stored_token");
+        for (index, is_sse) in [(0usize, false), (1usize, true)] {
+            let headers = match &servers[index].transport {
+                SessionMcpTransport::StreamableHttp { headers, .. } if !is_sse => headers,
+                SessionMcpTransport::Sse { headers, .. } if is_sse => headers,
+                other => panic!("unexpected transport at {index}: {other:?}"),
+            };
+            assert_eq!(headers.get("Authorization").map(String::as_str), expected);
+        }
+        // Stdio carries no headers at all.
+        assert!(matches!(&servers[2].transport, SessionMcpTransport::Stdio { .. }));
+    }
+
+    #[tokio::test]
+    async fn oauth_keeps_a_user_supplied_authorization_header() {
+        let oauth = oauth_with_stored_token();
+        let mut servers = vec![SessionMcpServer {
+            id: "http".into(),
+            name: "http".into(),
+            transport: SessionMcpTransport::Http {
+                url: "https://mcp.example.com/http".into(),
+                headers: std::collections::HashMap::from([("authorization".to_owned(), "Token user-owned".to_owned())]),
+            },
+        }];
+
+        apply_oauth_to_neutral_servers(&oauth, TEST_USER_ID, &mut servers).await;
+
+        let SessionMcpTransport::Http { headers, .. } = &servers[0].transport else {
+            panic!("expected Http transport");
+        };
+        assert_eq!(headers.len(), 1);
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Token user-owned")
+        );
     }
 }
