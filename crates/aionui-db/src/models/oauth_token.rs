@@ -22,3 +22,20 @@ pub struct OAuthTokenRow {
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
+
+/// Authorization context a stored token was issued under (the
+/// `oauth_tokens.client_*`, `token_endpoint` and `scope` columns).
+///
+/// Refreshing must present the same client as the login that obtained the
+/// refresh token; dynamically registered clients differ per server and per
+/// registration. `client_secret` is stored encrypted, like the tokens.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct OAuthClientRegistrationRow {
+    pub client_id: String,
+    pub client_secret: Option<String>,
+    /// RFC 7591 `token_endpoint_auth_method`, when the server reported one.
+    #[sqlx(rename = "client_token_endpoint_auth_method")]
+    pub token_endpoint_auth_method: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub scope: Option<String>,
+}

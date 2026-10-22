@@ -15,7 +15,8 @@ async fn discovers_monday_sse_endpoints() {
     let metadata = OAuthDiscovery::new(&client)
         .discover("https://mcp.monday.com/sse")
         .await
-        .expect("discovery must succeed for monday.com MCP server");
+        .expect("discovery must succeed for monday.com MCP server")
+        .metadata;
 
     assert!(
         metadata.authorization_endpoint.starts_with("https://"),

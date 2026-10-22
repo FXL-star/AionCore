@@ -224,3 +224,13 @@ debug = "line-tables-only"
 split-debuginfo = "unpacked"
 incremental = false
 
+
+# TEMPORARY (local verification only, do not commit): use the local aionrs
+# checkout so the MCP header-provider work under ../aionrs is compiled in.
+[patch."https://github.com/iOfficeAI/aionrs.git"]
+aion-agent = { path = "../aionrs/crates/aion-agent" }
+aion-providers = { path = "../aionrs/crates/aion-providers" }
+aion-types = { path = "../aionrs/crates/aion-types" }
+aion-protocol = { path = "../aionrs/crates/aion-protocol" }
+aion-config = { path = "../aionrs/crates/aion-config" }
+aion-mcp = { path = "../aionrs/crates/aion-mcp" }

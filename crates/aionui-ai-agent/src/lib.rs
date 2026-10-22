@@ -18,6 +18,7 @@ pub mod manager;
 /// clean-slate `aionui-agent-context::mcp_resolve` — the SSOT that turns a
 /// conversation's configured MCP servers into the SDK-free `SessionMcpServer`
 /// shape the `SessionBackend` stack carries in `SessionConfig.init.mcp_servers`.
+pub mod mcp_oauth_headers;
 pub mod mcp_resolve;
 pub mod media;
 pub(crate) mod persistence;

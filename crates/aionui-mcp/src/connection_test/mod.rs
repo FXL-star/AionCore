@@ -244,7 +244,7 @@ impl McpConnectionTestService {
                 )
             })?;
 
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        if protocol::is_auth_challenge(resp.status(), resp.headers()) {
             return Err(protocol::auth_result(resp.headers()));
         }
         if !resp.status().is_success() {
@@ -301,7 +301,7 @@ impl McpConnectionTestService {
                 );
             }
         };
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        if protocol::is_auth_challenge(resp.status(), resp.headers()) {
             return protocol::auth_result(resp.headers());
         }
         if !resp.status().is_success() {

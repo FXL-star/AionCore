@@ -503,6 +503,21 @@ pub(super) fn rpc_error_result(method: &str, err: &JsonRpcError) -> McpConnectio
     )
 }
 
+/// Whether a response asks the client to (re-)authorize: `401`, or `403`
+/// with a Bearer `insufficient_scope` challenge (MCP step-up authorization).
+pub(super) fn is_auth_challenge(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED => true,
+        reqwest::StatusCode::FORBIDDEN => headers
+            .get_all(reqwest::header::WWW_AUTHENTICATE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(crate::oauth_discovery::parse_bearer_challenge)
+            .any(|challenge| challenge.error.as_deref() == Some("insufficient_scope")),
+        _ => false,
+    }
+}
+
 pub(super) fn auth_result(headers: &reqwest::header::HeaderMap) -> McpConnectionTestResult {
     let www_authenticate = headers
         .get("www-authenticate")
@@ -880,5 +895,20 @@ mod tests {
     fn extract_jsonrpc_from_sse_no_response() {
         let body = "data: not json\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"log\"}\n";
         assert!(extract_jsonrpc_from_sse(body).is_err());
+    }
+
+    #[test]
+    fn forbidden_with_insufficient_scope_is_an_auth_challenge() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert!(is_auth_challenge(reqwest::StatusCode::UNAUTHORIZED, &headers));
+        assert!(!is_auth_challenge(reqwest::StatusCode::FORBIDDEN, &headers));
+        headers.insert(
+            "www-authenticate",
+            "Bearer error=\"insufficient_scope\", scope=\"files:write\""
+                .parse()
+                .unwrap(),
+        );
+        assert!(is_auth_challenge(reqwest::StatusCode::FORBIDDEN, &headers));
+        assert!(!is_auth_challenge(reqwest::StatusCode::BAD_GATEWAY, &headers));
     }
 }

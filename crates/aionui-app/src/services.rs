@@ -261,13 +261,15 @@ impl AppServices {
         let mcp_server_repo: Arc<dyn IMcpServerRepository> =
             Arc::new(SqliteMcpServerRepository::new(database.pool().clone()));
         // Shared OAuth store for MCP servers. The `/api/mcp/oauth/*` routes, the
-        // connection test, and session builds must use ONE instance: dynamically
-        // registered client credentials are cached in-process and a refresh
-        // through a different instance would fall back to the static client id.
+        // connection test, and session builds use ONE instance so pending
+        // logins and per-token refresh locks are shared.
+        // Tokens and client secrets are encrypted at rest with the app key
+        // (MCP authorization spec: secure token storage).
         let mcp_oauth_service = aionui_mcp::McpOAuthService::new(
             Arc::new(SqliteOAuthTokenRepository::new(database.pool().clone())),
             reqwest::Client::new(),
-        );
+        )
+        .with_encryption_key(encryption_key);
 
         let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
             Arc::new(SqliteAgentMetadataRepository::new(database.pool().clone()));

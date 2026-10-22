@@ -1,7 +1,7 @@
 use sqlx::SqlitePool;
 
 use crate::error::DbError;
-use crate::models::OAuthTokenRow;
+use crate::models::{OAuthClientRegistrationRow, OAuthTokenRow};
 use crate::repository::oauth_token::{IOAuthTokenRepository, UpsertOAuthTokenParams};
 
 /// SQLite-backed implementation of [`IOAuthTokenRepository`].
@@ -85,6 +85,49 @@ impl IOAuthTokenRepository for SqliteOAuthTokenRepository {
                 .await?;
 
         Ok(rows.into_iter().map(|(url,)| url).collect())
+    }
+
+    async fn get_client_registration(
+        &self,
+        user_id: &str,
+        server_url: &str,
+    ) -> Result<Option<OAuthClientRegistrationRow>, DbError> {
+        let row = sqlx::query_as::<_, OAuthClientRegistrationRow>(
+            "SELECT client_id, client_secret, client_token_endpoint_auth_method, token_endpoint, scope \
+             FROM oauth_tokens \
+             WHERE user_id = ? AND server_url = ? AND client_id IS NOT NULL",
+        )
+        .bind(user_id)
+        .bind(server_url)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    async fn set_client_registration(
+        &self,
+        user_id: &str,
+        server_url: &str,
+        registration: &OAuthClientRegistrationRow,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE oauth_tokens SET client_id = ?, client_secret = ?, \
+                client_token_endpoint_auth_method = ?, token_endpoint = ?, scope = ?, updated_at = ? \
+             WHERE user_id = ? AND server_url = ?",
+        )
+        .bind(&registration.client_id)
+        .bind(&registration.client_secret)
+        .bind(&registration.token_endpoint_auth_method)
+        .bind(&registration.token_endpoint)
+        .bind(&registration.scope)
+        .bind(aionui_common::now_ms())
+        .bind(user_id)
+        .bind(server_url)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 }
 
@@ -227,6 +270,84 @@ mod tests {
         assert_eq!(urls.len(), 2);
         assert!(urls.contains(&"https://mcp.example.com".to_string()));
         assert!(urls.contains(&"https://other.example.com".to_string()));
+    }
+
+    fn dcr_client() -> OAuthClientRegistrationRow {
+        OAuthClientRegistrationRow {
+            client_id: "dcr-client-123".to_owned(),
+            client_secret: Some("dcr-secret".to_owned()),
+            token_endpoint_auth_method: Some("client_secret_post".to_owned()),
+            token_endpoint: Some("https://auth.example.com/token".to_owned()),
+            scope: Some("files:read".to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn client_registration_round_trips_on_the_token_row() {
+        let (repo, _db) = setup().await;
+        repo.upsert(sample_params()).await.unwrap();
+
+        assert!(
+            repo.get_client_registration(USER_A, "https://mcp.example.com")
+                .await
+                .unwrap()
+                .is_none(),
+            "a row written without a client reports none"
+        );
+
+        repo.set_client_registration(USER_A, "https://mcp.example.com", &dcr_client())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repo.get_client_registration(USER_A, "https://mcp.example.com")
+                .await
+                .unwrap(),
+            Some(dcr_client())
+        );
+    }
+
+    /// A refresh rewrites the token through `upsert`; it must not drop the
+    /// client the refresh token is bound to.
+    #[tokio::test]
+    async fn token_upsert_preserves_client_registration() {
+        let (repo, _db) = setup().await;
+        repo.upsert(sample_params()).await.unwrap();
+        repo.set_client_registration(USER_A, "https://mcp.example.com", &dcr_client())
+            .await
+            .unwrap();
+
+        repo.upsert(UpsertOAuthTokenParams {
+            access_token: "refreshed",
+            ..sample_params()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            repo.get_client_registration(USER_A, "https://mcp.example.com")
+                .await
+                .unwrap(),
+            Some(dcr_client())
+        );
+    }
+
+    #[tokio::test]
+    async fn client_registration_is_removed_with_the_token() {
+        let (repo, _db) = setup().await;
+        repo.upsert(sample_params()).await.unwrap();
+        repo.set_client_registration(USER_A, "https://mcp.example.com", &dcr_client())
+            .await
+            .unwrap();
+
+        repo.delete(USER_A, "https://mcp.example.com").await.unwrap();
+
+        assert!(
+            repo.get_client_registration(USER_A, "https://mcp.example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

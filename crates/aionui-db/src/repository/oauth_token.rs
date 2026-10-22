@@ -1,5 +1,5 @@
 use crate::error::DbError;
-use crate::models::OAuthTokenRow;
+use crate::models::{OAuthClientRegistrationRow, OAuthTokenRow};
 
 /// OAuth token data access abstraction for MCP server authentication.
 ///
@@ -21,6 +21,31 @@ pub trait IOAuthTokenRepository: Send + Sync {
 
     /// Returns the list of server URLs that have stored tokens.
     async fn list_authenticated_urls(&self, user_id: &str) -> Result<Vec<String>, DbError>;
+
+    /// Returns the authorization context (client, token endpoint, scope) the
+    /// stored token for `server_url` was issued under, or `None` when there is
+    /// no token or the client is unknown.
+    ///
+    /// Defaults to `None` so repositories without client storage fall back to
+    /// discovery and the static client id.
+    async fn get_client_registration(
+        &self,
+        _user_id: &str,
+        _server_url: &str,
+    ) -> Result<Option<OAuthClientRegistrationRow>, DbError> {
+        Ok(None)
+    }
+
+    /// Records the authorization context the stored token for `server_url`
+    /// was issued under. A no-op when no token row exists.
+    async fn set_client_registration(
+        &self,
+        _user_id: &str,
+        _server_url: &str,
+        _registration: &OAuthClientRegistrationRow,
+    ) -> Result<(), DbError> {
+        Ok(())
+    }
 }
 
 /// Parameters for inserting or updating an OAuth token.

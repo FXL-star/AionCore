@@ -12,6 +12,7 @@ use aion_agent::session::Session;
 use aion_config::compat::ProviderCompat;
 use aion_config::config::{CliArgs, Config, McpServerConfig, ProviderType};
 use aion_mcp::manager::McpManager;
+use aion_mcp::transport::McpHeaderProvider;
 use aion_protocol::commands::{ApprovalScope, SessionMode};
 use aion_protocol::{ToolApprovalManager, ToolApprovalResult};
 use aionui_api_types::{
@@ -143,6 +144,22 @@ impl AionrsAgentManager {
         config_extra: AionrsResolvedConfig,
         resume_session: Option<Session>,
     ) -> Result<Self, AgentError> {
+        Self::new_with_mcp_header_provider(conversation_id, workspace, config_extra, resume_session, None).await
+    }
+
+    /// Same as [`Self::new`], plus a request-time credential source for MCP
+    /// HTTP transports.
+    ///
+    /// The provider is consulted before every MCP request, so a session that
+    /// outlives its OAuth access token keeps working after the token is
+    /// refreshed.
+    pub async fn new_with_mcp_header_provider(
+        conversation_id: String,
+        workspace: String,
+        config_extra: AionrsResolvedConfig,
+        resume_session: Option<Session>,
+        mcp_header_provider: Option<Arc<dyn McpHeaderProvider>>,
+    ) -> Result<Self, AgentError> {
         let runtime = AgentRuntime::new(conversation_id.clone(), workspace.clone(), 128);
         let sink: Arc<dyn OutputSink> = Arc::new(BackendOutputSink::new(runtime.event_sender()));
         let runtime_env = config_extra.runtime_env.clone();
@@ -220,6 +237,9 @@ impl AionrsAgentManager {
         let provider_label = config.provider_label.clone();
 
         let mut bootstrap = AgentBootstrap::new(config, &workspace, sink).runtime_env(runtime_env);
+        if let Some(provider) = mcp_header_provider {
+            bootstrap = bootstrap.mcp_header_provider(provider);
+        }
         if let Some(session) = resume_session {
             info!(
                 conversation_id = %conversation_id,
