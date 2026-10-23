@@ -197,8 +197,10 @@ mod tests {
                         let base = base.clone();
                         async move {
                             Json(json!({
+                                "issuer": base,
                                 "authorization_endpoint": format!("{base}/authorize"),
                                 "token_endpoint": format!("{base}/token"),
+                                "code_challenge_methods_supported": ["S256"],
                             }))
                         }
                     }),
@@ -230,7 +232,9 @@ mod tests {
                                 .get("authorization")
                                 .and_then(|h| h.to_str().ok())
                                 .unwrap_or_default();
-                            requests.lock().await.push(token.to_owned());
+                            if rpc["method"].as_str() == Some("tools/call") {
+                                requests.lock().await.push(token.to_owned());
+                            }
                             if token != "Bearer fresh_access" {
                                 return StatusCode::UNAUTHORIZED.into_response();
                             }
@@ -325,6 +329,44 @@ mod tests {
     #[tokio::test]
     async fn server_401_refreshes_a_token_without_expires_in() {
         RefreshHarness::new(None, false).await.call_twice(true).await;
+    }
+
+    #[tokio::test]
+    async fn rotated_refresh_token_survives_header_provider_recreation() {
+        let harness = RefreshHarness::new(Some(aionui_common::now_ms() - 1000), false).await;
+        let first = harness
+            .provider
+            .headers("test", &harness.url, false)
+            .await
+            .expect("first refreshed header");
+        assert_eq!(
+            first.get("Authorization").map(String::as_str),
+            Some("Bearer fresh_access")
+        );
+
+        let repo: Arc<dyn IOAuthTokenRepository> =
+            Arc::new(aionui_db::SqliteOAuthTokenRepository::new(harness._db.pool().clone()));
+        let oauth = McpOAuthService::new(repo, reqwest::Client::builder().no_proxy().build().unwrap());
+        let reopened = McpOAuthHeaderProvider::new(oauth, "system_default_user");
+        let second = reopened
+            .headers("test", &harness.url, true)
+            .await
+            .expect("header after service recreation");
+        assert_eq!(
+            second.get("Authorization").map(String::as_str),
+            Some("Bearer fresh_access")
+        );
+
+        let forms = harness.forms.lock().await;
+        assert_eq!(forms.len(), 2);
+        assert_eq!(
+            forms[0].get("refresh_token").map(String::as_str),
+            Some("original_refresh")
+        );
+        assert_eq!(
+            forms[1].get("refresh_token").map(String::as_str),
+            Some("rotated_refresh")
+        );
     }
 
     #[tokio::test]

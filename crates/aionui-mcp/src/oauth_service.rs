@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::error::McpError;
+use crate::oauth_callback_page::{CallbackPageKind, render_callback_page};
 use crate::oauth_discovery::{ClientCredentials, OAuthDiscovery, OAuthServerMetadata};
 
 // ---------------------------------------------------------------------------
@@ -934,20 +935,17 @@ async fn handle_callback_connection(mut stream: TcpStream, expected_state: &str)
     let outcome = classify_callback_request(&request, expected_state);
 
     let (status, body) = match &outcome {
-        CallbackOutcome::Code(_) => (
-            "200 OK",
-            "<h1>Authorization successful!</h1><p>You can close this window and return to AionUi.</p>",
+        CallbackOutcome::Code(_) => ("200 OK", render_callback_page(CallbackPageKind::Success)),
+        CallbackOutcome::Denied(_) => ("200 OK", render_callback_page(CallbackPageKind::Failure)),
+        CallbackOutcome::Ignored => (
+            "404 Not Found",
+            "<html><body><h1>Not found</h1></body></html>".to_string(),
         ),
-        CallbackOutcome::Denied(_) => (
-            "200 OK",
-            "<h1>Authorization failed</h1><p>Return to AionUi for details.</p>",
-        ),
-        CallbackOutcome::Ignored => ("404 Not Found", "<h1>Not found</h1>"),
     };
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n\
-         Connection: close\r\nContent-Length: {}\r\n\r\n<html><body>{body}</body></html>",
-        body.len() + "<html><body></body></html>".len()
+         Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.shutdown().await;
