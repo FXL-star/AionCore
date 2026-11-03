@@ -543,6 +543,7 @@ impl AssistantService {
             .min()
             .unwrap_or_default()
             .min(0);
+        // 获取系统中内置的agent，过滤出符合条件的（已开启、本地已安装）
         let generated_rows: Vec<&AgentManagementRow> = rows
             .iter()
             .filter(|row| {
@@ -563,7 +564,7 @@ impl AssistantService {
         let mut missing_index = 0usize;
         for row in generated_rows {
             if let Err(error) = self
-                .reconcile_generated_assistant(
+                .reconcile_generated_assistant( 、、
                     user_id,
                     row,
                     GeneratedAssistantReconcileContext {
