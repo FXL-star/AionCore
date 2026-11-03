@@ -191,7 +191,7 @@ VALUES
     -- ACP builtin agents
     ('2d23ff1c', '/api/assets/logos/ai-major/claude.svg', 'Claude Code',
      'claude', 'acp', 'builtin', '{"binary_name":"claude","bridge_binary":"bun"}',
-     1, 'bun', '["x","--bun","@agentclientprotocol/claude-agent-acp@0.29.2"]', '[]',
+     0, 'bun', '["x","--bun","@agentclientprotocol/claude-agent-acp@0.29.2"]', '[]',
      '[".claude/skills"]',
      '{"supports_side_question":true,"self_identity_sticky":true,"session_load_via_meta_field":true,"supports_team":true}',
      'bypassPermissions', 3100,
@@ -199,7 +199,7 @@ VALUES
 
     ('8e1acf31', '/api/assets/logos/tools/coding/codex.svg', 'Codex CLI',
      'codex', 'acp', 'builtin', '{"binary_name":"codex","bridge_binary":"bun"}',
-     1, 'bun', '["x","--bun","@zed-industries/codex-acp@0.9.5"]', '[]',
+     0, 'bun', '["x","--bun","@zed-industries/codex-acp@0.9.5"]', '[]',
      '[".codex/skills"]',
      '{"supports_side_question":false,"supports_team":true}',
      'full-access', 3110,
@@ -207,7 +207,7 @@ VALUES
 
     ('cc126dd5', '/api/assets/logos/ai-major/gemini.svg', 'Gemini CLI',
      'gemini', 'acp', 'builtin', '{"binary_name":"gemini"}',
-     1, 'gemini', '["--experimental-acp"]', '[]',
+     0, 'gemini', '["--experimental-acp"]', '[]',
      '[".gemini/skills"]',
      '{"supports_side_question":false,"supports_team":true}',
      'yolo', 3120,
@@ -215,7 +215,7 @@ VALUES
 
     ('26a946ed', '/api/assets/logos/ai-china/qwen.svg', 'Qwen',
      'qwen', 'acp', 'builtin', '{"binary_name":"qwen"}',
-     1, 'qwen', '["--acp"]', '[]',
+     0, 'qwen', '["--acp"]', '[]',
      '[".qwen/skills"]',
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -223,7 +223,7 @@ VALUES
 
     ('8b20fd41', '/api/assets/logos/tools/coding/codebuddy.svg', 'CodeBuddy',
      'codebuddy', 'acp', 'builtin', '{"binary_name":"codebuddy","bridge_binary":"bun"}',
-     1, 'bun', '["x","--bun","@tencent-ai/codebuddy-code@2.73.0","--acp"]', '[]',
+     0, 'bun', '["x","--bun","@tencent-ai/codebuddy-code@2.73.0","--acp"]', '[]',
      '[".codebuddy/skills"]',
      '{"supports_side_question":false,"supports_team":true}',
      'bypassPermissions', 3130,
@@ -231,7 +231,7 @@ VALUES
 
     ('da386544', '/api/assets/logos/brand/droid.svg', 'Droid',
      'droid', 'acp', 'builtin', '{"binary_name":"droid"}',
-     1, 'droid', '["exec","--output-format","acp"]', '[]',
+     0, 'droid', '["exec","--output-format","acp"]', '[]',
      '[".factory/skills"]',
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -239,7 +239,7 @@ VALUES
 
     ('600c6601', '/api/assets/logos/tools/goose.svg', 'Goose',
      'goose', 'acp', 'builtin', '{"binary_name":"goose"}',
-     1, 'goose', '["acp"]', '[]',
+     0, 'goose', '["acp"]', '[]',
      '[".goose/skills"]',
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -247,7 +247,7 @@ VALUES
 
     ('eb895030', '/api/assets/logos/brand/auggie.svg', 'Auggie',
      'auggie', 'acp', 'builtin', '{"binary_name":"auggie"}',
-     1, 'auggie', '["--acp"]', '[]',
+     0, 'auggie', '["--acp"]', '[]',
      NULL,
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -255,7 +255,7 @@ VALUES
 
     ('e241c49c', '/api/assets/logos/ai-china/kimi.svg', 'Kimi',
      'kimi', 'acp', 'builtin', '{"binary_name":"kimi"}',
-     1, 'kimi', '["acp"]', '[]',
+     0, 'kimi', '["acp"]', '[]',
      '[".kimi/skills"]',
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -263,7 +263,7 @@ VALUES
 
     ('53861a53', '/api/assets/logos/tools/coding/opencode-light.svg', 'OpenCode',
      'opencode', 'acp', 'builtin', '{"binary_name":"opencode"}',
-     1, 'opencode', '["acp"]', '[]',
+     0, 'opencode', '["acp"]', '[]',
      '[".opencode/skills"]',
      '{"supports_side_question":false}',
      'build', 3130,
@@ -271,7 +271,7 @@ VALUES
 
     ('3cd9d436', '/api/assets/logos/tools/github.svg', 'Copilot',
      'copilot', 'acp', 'builtin', '{"binary_name":"copilot"}',
-     1, 'copilot', '["--acp","--stdio"]', '[]',
+     0, 'copilot', '["--acp","--stdio"]', '[]',
      NULL,
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -279,7 +279,7 @@ VALUES
 
     ('1e4afc51', '/api/assets/logos/tools/coding/qoder.png', 'Qoder',
      'qoder', 'acp', 'builtin', '{"binary_name":"qoder"}',
-     1, 'qoder', '["--acp"]', '[]',
+     0, 'qoder', '["--acp"]', '[]',
      NULL,
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -287,7 +287,7 @@ VALUES
 
     ('65d0f5b2', '/api/assets/logos/ai-major/mistral.svg', 'Vibe',
      'vibe', 'acp', 'builtin', '{"binary_name":"vibe"}',
-     1, 'vibe', '[]', '[]',
+     0, 'vibe', '[]', '[]',
      '[".vibe/skills"]',
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -295,7 +295,7 @@ VALUES
 
     ('a0dfb1ec', '/api/assets/logos/tools/coding/cursor.png', 'Cursor',
      'cursor', 'acp', 'builtin', '{"binary_name":"cursor"}',
-     1, 'cursor', '["acp"]', '[]',
+     0, 'cursor', '["acp"]', '[]',
      '[".cursor/skills"]',
      '{"supports_side_question":false}',
      'agent', 3130,
@@ -303,7 +303,7 @@ VALUES
 
     ('e044000d', NULL, 'Kiro',
      'kiro', 'acp', 'builtin', '{"binary_name":"kiro"}',
-     1, 'kiro', '["acp"]', '[]',
+     0, 'kiro', '["acp"]', '[]',
      NULL,
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -311,7 +311,7 @@ VALUES
 
     ('55f3ed1c', '/api/assets/logos/brand/hermes.svg', 'Hermes',
      'hermes', 'acp', 'builtin', '{"binary_name":"hermes"}',
-     1, 'hermes', '["acp"]', '[]',
+     0, 'hermes', '["acp"]', '[]',
      NULL,
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -319,7 +319,7 @@ VALUES
 
     ('346b0041', '/api/assets/logos/tools/coding/snow.png', 'Snow',
      'snow', 'acp', 'builtin', '{"binary_name":"snow"}',
-     1, 'snow', '["--acp"]', '[]',
+     0, 'snow', '["--acp"]', '[]',
      NULL,
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -328,7 +328,7 @@ VALUES
     -- Non-ACP builtins
     ('fb1083a5', '/api/assets/logos/tools/nanobot.svg', 'Nanobot',
      NULL, 'nanobot', 'builtin', '{"binary_name":"nanobot"}',
-     1, 'nanobot', '["--experimental-acp"]', '[]',
+     0, 'nanobot', '["--experimental-acp"]', '[]',
      NULL,
      '{}',
      'yolo', 3990,
@@ -336,7 +336,7 @@ VALUES
 
     ('f9f61666', '/api/assets/logos/tools/openclaw.svg', 'OpenClaw',
      NULL, 'openclaw-gateway', 'builtin', '{"binary_name":"openclaw"}',
-     1, 'openclaw', '[]', '[]',
+     0, 'openclaw', '[]', '[]',
      NULL,
      '{}',
      'yolo', 3900,
@@ -345,7 +345,7 @@ VALUES
     -- Internal
     ('632f31d2', '/api/assets/logos/brand/aion.svg', 'Aion CLI',
      NULL, 'aionrs', 'internal', '{}',
-     1, NULL, '[]', '[]',
+     0, NULL, '[]', '[]',
      '[".aionrs/skills"]',
      '{"supports_team":true}',
      'yolo', 100,
