@@ -23,6 +23,16 @@ impl MockTeamRepo {
 
 #[async_trait::async_trait]
 impl ITeamRepository for MockTeamRepo {
+    async fn get_team_by_source_ref(
+        &self,
+        _user_id: &str,
+        _source_ref: &str,
+    ) -> Result<Option<aionui_db::models::TeamRow>, DbError> {
+        Ok(None)
+    }
+    async fn restore_builtin_team(&self, _user_id: &str, _team_id: &str) -> Result<bool, DbError> {
+        Ok(false)
+    }
     async fn create_team(&self, _row: &TeamRow) -> Result<(), DbError> {
         Ok(())
     }

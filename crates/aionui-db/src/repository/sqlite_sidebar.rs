@@ -87,7 +87,7 @@ impl ISidebarStore for SqliteSidebarStore {
     async fn list_teams_thin(&self, user_id: &str, scope: ArchiveScope) -> Result<Vec<SidebarTeamThin>, DbError> {
         let archived = archived_predicate(scope);
         let sql = format!(
-            "SELECT id, name, \
+            "SELECT id, name, source = 'builtin' AS is_builtin, \
                     NULLIF(project_id, '') AS project_id, \
                     workspace, updated_at, created_at \
              FROM teams \
@@ -100,12 +100,35 @@ impl ISidebarStore for SqliteSidebarStore {
             .map(|row| SidebarTeamThin {
                 id: row.get("id"),
                 name: row.get("name"),
+                is_builtin: row.get("is_builtin"),
                 project_id: non_blank(row.get("project_id")),
                 workspace: non_blank(row.get("workspace")),
                 updated_at: row.get("updated_at"),
                 created_at: row.get("created_at"),
             })
             .collect())
+    }
+
+    async fn team_source(&self, user_id: &str, id: &str) -> Result<Option<String>, DbError> {
+        Ok(
+            sqlx::query_scalar("SELECT source FROM teams WHERE user_id = ? AND id = ?")
+                .bind(user_id)
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    async fn conversation_team_source(&self, user_id: &str, id: &str) -> Result<Option<String>, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT t.source FROM conversations c JOIN teams t ON t.user_id = c.user_id \
+             AND t.id = COALESCE(NULLIF(json_extract(c.extra, '$.team_id'), ''), NULLIF(json_extract(c.extra, '$.teamId'), '')) \
+             WHERE c.user_id = ? AND c.id = ?",
+        )
+        .bind(user_id)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     async fn list_user_projects(&self, user_id: &str) -> Result<Vec<SidebarProjectMeta>, DbError> {

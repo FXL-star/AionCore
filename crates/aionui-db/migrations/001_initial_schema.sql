@@ -191,7 +191,7 @@ VALUES
     -- ACP builtin agents
     ('2d23ff1c', '/api/assets/logos/ai-major/claude.svg', 'Claude Code',
      'claude', 'acp', 'builtin', '{"binary_name":"claude","bridge_binary":"bun"}',
-     0, 'bun', '["x","--bun","@agentclientprotocol/claude-agent-acp@0.29.2"]', '[]',
+     1, 'bun', '["x","--bun","@agentclientprotocol/claude-agent-acp@0.29.2"]', '[]',
      '[".claude/skills"]',
      '{"supports_side_question":true,"self_identity_sticky":true,"session_load_via_meta_field":true,"supports_team":true}',
      'bypassPermissions', 3100,
@@ -199,7 +199,7 @@ VALUES
 
     ('8e1acf31', '/api/assets/logos/tools/coding/codex.svg', 'Codex CLI',
      'codex', 'acp', 'builtin', '{"binary_name":"codex","bridge_binary":"bun"}',
-     0, 'bun', '["x","--bun","@zed-industries/codex-acp@0.9.5"]', '[]',
+     1, 'bun', '["x","--bun","@zed-industries/codex-acp@0.9.5"]', '[]',
      '[".codex/skills"]',
      '{"supports_side_question":false,"supports_team":true}',
      'full-access', 3110,
@@ -255,7 +255,7 @@ VALUES
 
     ('e241c49c', '/api/assets/logos/ai-china/kimi.svg', 'Kimi',
      'kimi', 'acp', 'builtin', '{"binary_name":"kimi"}',
-     0, 'kimi', '["acp"]', '[]',
+     1, 'kimi', '["acp"]', '[]',
      '[".kimi/skills"]',
      '{"supports_side_question":false}',
      'yolo', 3130,
@@ -295,7 +295,7 @@ VALUES
 
     ('a0dfb1ec', '/api/assets/logos/tools/coding/cursor.png', 'Cursor',
      'cursor', 'acp', 'builtin', '{"binary_name":"cursor"}',
-     0, 'cursor', '["acp"]', '[]',
+     1, 'cursor', '["acp"]', '[]',
      '[".cursor/skills"]',
      '{"supports_side_question":false}',
      'agent', 3130,
@@ -336,7 +336,7 @@ VALUES
 
     ('f9f61666', '/api/assets/logos/tools/openclaw.svg', 'OpenClaw',
      NULL, 'openclaw-gateway', 'builtin', '{"binary_name":"openclaw"}',
-     0, 'openclaw', '[]', '[]',
+     1, 'openclaw', '[]', '[]',
      NULL,
      '{}',
      'yolo', 3900,
@@ -345,7 +345,7 @@ VALUES
     -- Internal
     ('632f31d2', '/api/assets/logos/brand/aion.svg', 'Aion CLI',
      NULL, 'aionrs', 'internal', '{}',
-     0, NULL, '[]', '[]',
+     1, NULL, '[]', '[]',
      '[".aionrs/skills"]',
      '{"supports_team":true}',
      'yolo', 100,

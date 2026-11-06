@@ -19,5 +19,5 @@ pub use routes::{
 };
 pub use state::{
     ChannelOrchestratorComponents, ModuleStates, RouterBuildError, build_assistant_state, build_conversation_state,
-    build_extension_states, build_module_states, build_ws_state,
+    build_extension_states, build_module_states, build_module_states_with_builtin_teams, build_ws_state,
 };

@@ -19,6 +19,8 @@ async fn setup() -> (TaskBoard, aionui_db::Database) {
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(SqliteTeamRepository::new(db.pool().clone()));
     repo.create_team(&aionui_db::models::TeamRow {
+        source: "user".into(),
+        source_ref: None,
         id: "t1".to_owned(),
         user_id: "system_default_user".to_owned(),
         name: "t1".to_owned(),

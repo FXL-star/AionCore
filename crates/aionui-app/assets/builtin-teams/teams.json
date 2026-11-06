@@ -1,0 +1,20 @@
+{
+  "version": "1.0.0",
+  "teams": [
+    {
+      "id": "builtin-office-suite",
+      "sort_order": 0,
+      "default_enabled": true,
+      "name": "Office Suite",
+      "name_i18n": { "en-US": "Office Suite", "zh-CN": "办公套件团队" },
+      "description": "A ready-made team for Word / PPT / Excel document work.",
+      "description_i18n": { "zh-CN": "面向 Word / PPT / Excel 文档工作的开箱即用团队。" },
+      "workspace_mode": "shared",
+      "agents": [
+        { "assistant_id": "aionui-assistant", "role": "lead", "name": "Word 助手", "model": "" },
+        { "assistant_id": "ppt-creator", "role": "teammate", "name": "PPT 助手", "model": "" },
+        { "assistant_id": "excel-creator", "role": "teammate", "name": "Excel 助手", "model": "" }
+      ]
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 mod describe_support;
+mod materialize;
 mod response_builder;
 pub(crate) mod spawn_support;
 
@@ -147,6 +148,8 @@ struct MemberRuntimeReconcileWork {
 }
 
 pub struct TeamSessionService {
+    builtin_registry: RwLock<Option<Arc<crate::builtin::BuiltinTeamRegistry>>>,
+    builtin_materialization_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
     repo: Arc<dyn ITeamRepository>,
     agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
     assistant_catalog: Arc<dyn TeamAssistantCatalogPort>,
@@ -301,6 +304,8 @@ impl TeamSessionService {
             backend_binary_path,
             prompt_dump,
             sessions: Arc::new(DashMap::new()),
+            builtin_registry: RwLock::new(None),
+            builtin_materialization_locks: DashMap::new(),
             add_agent_locks: Arc::new(DashMap::new()),
             ensure_session_locks: Arc::new(DashMap::new()),
             project_service: Arc::new(RwLock::new(None)),
@@ -795,6 +800,8 @@ impl TeamSessionService {
         let (project_id, folder_id) = self.resolve_binding_best_effort(user_id, &team_workspace).await;
 
         let row = TeamRow {
+            source: "user".into(),
+            source_ref: None,
             id: team_id.clone(),
             user_id: user_id.to_owned(),
             name: req.name.clone(),
@@ -812,6 +819,7 @@ impl TeamSessionService {
         self.repo.create_team(&row).await?;
 
         let team = Team {
+            source: "user".into(),
             id: team_id,
             name: req.name,
             workspace: team_workspace,
@@ -838,6 +846,10 @@ impl TeamSessionService {
     }
 
     pub async fn list_teams(&self, user_id: &str) -> Result<Vec<TeamResponse>, TeamError> {
+        let registry = self.builtin_registry.read().unwrap().clone();
+        if let Some(registry) = registry {
+            self.materialize_builtin_teams(user_id, &registry).await?;
+        }
         let rows = self.repo.list_teams_by_user(user_id).await?;
         let mut teams = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -877,6 +889,7 @@ impl TeamSessionService {
     }
 
     pub async fn remove_team(&self, user_id: &str, team_id: &str) -> Result<(), TeamError> {
+        self.ensure_team_mutable(user_id, team_id, "remove_team").await?;
         let team = self.load_owned_team(user_id, team_id).await?;
 
         self.stop_team_runtime_and_agents(team_id, &team, AgentKillReason::TeamDeleted)
@@ -940,6 +953,7 @@ impl TeamSessionService {
     }
 
     pub async fn rename_team(&self, user_id: &str, team_id: &str, name: &str) -> Result<(), TeamError> {
+        self.ensure_team_mutable(user_id, team_id, "rename_team").await?;
         self.load_owned_team(user_id, team_id).await?;
 
         self.repo
@@ -962,6 +976,7 @@ impl TeamSessionService {
         team_id: &str,
         req: AddAgentRequest,
     ) -> Result<TeamAgentResponse, TeamError> {
+        self.ensure_team_mutable(user_id, team_id, "add_agent").await?;
         let lock = self
             .add_agent_locks
             .entry(team_id.to_owned())
@@ -1018,6 +1033,7 @@ impl TeamSessionService {
     }
 
     pub async fn remove_agent(&self, user_id: &str, team_id: &str, slot_id: &str) -> Result<(), TeamError> {
+        self.ensure_team_mutable(user_id, team_id, "remove_agent").await?;
         let lock = self
             .add_agent_locks
             .entry(team_id.to_owned())
@@ -1178,6 +1194,7 @@ impl TeamSessionService {
     }
 
     pub async fn rename_agent(&self, user_id: &str, team_id: &str, slot_id: &str, name: &str) -> Result<(), TeamError> {
+        self.ensure_team_mutable(user_id, team_id, "rename_agent").await?;
         let lock = self
             .add_agent_locks
             .entry(team_id.to_owned())
@@ -1236,6 +1253,7 @@ impl TeamSessionService {
         slot_id: &str,
         model: &str,
     ) -> Result<(), TeamError> {
+        self.ensure_team_mutable(user_id, team_id, "update_agent_model").await?;
         let model = model.trim();
         if model.is_empty() {
             return Err(TeamError::InvalidRequest("model must not be empty".into()));
@@ -1442,6 +1460,7 @@ impl TeamSessionService {
         let user_id = row.user_id.clone();
         let mut team = Team::from_row(&row)?;
         self.reconcile_legacy_team_models(&user_id, team_id, &mut team).await?;
+        self.resolve_unset_builtin_models(&user_id, &mut team).await?;
         let agents_snapshot: Vec<TeamAgent> = team.agents.clone();
 
         if let Some(session) = self.sessions.get(team_id).map(|entry| Arc::clone(&entry.session)) {
@@ -1885,6 +1904,8 @@ impl TeamSessionService {
         option_id: &str,
         request: SetConfigOptionRequest,
     ) -> Result<SetConfigOptionResponse, TeamError> {
+        self.ensure_team_mutable(user_id, team_id, "set_conversation_config_option")
+            .await?;
         let row = self.load_owned_team_row(user_id, team_id).await?;
         let team = Team::from_row(&row)?;
         let member = team
@@ -3104,6 +3125,7 @@ impl TeamSessionService {
     }
 
     pub async fn set_session_mode(&self, user_id: &str, team_id: &str, mode: &str) -> Result<(), TeamError> {
+        self.ensure_team_mutable(user_id, team_id, "set_session_mode").await?;
         let team = self.load_owned_team(user_id, team_id).await?;
         if let Some(starting_member) = team
             .agents

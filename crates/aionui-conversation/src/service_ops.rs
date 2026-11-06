@@ -165,6 +165,8 @@ impl ConversationService {
             });
         }
         self.ensure_owned_conversation(user_id, conversation_id).await?;
+        self.ensure_team_member_mutable(user_id, conversation_id, "set_config_option")
+            .await?;
         if self.runtime_state().is_restarting(conversation_id) {
             return Err(ConversationError::RuntimeRestarting {
                 conversation_id: conversation_id.to_owned(),

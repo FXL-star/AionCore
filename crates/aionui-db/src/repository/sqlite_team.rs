@@ -23,8 +23,8 @@ impl ITeamRepository for SqliteTeamRepository {
 
     async fn create_team(&self, row: &TeamRow) -> Result<(), DbError> {
         sqlx::query(
-            "INSERT INTO teams (id, user_id, name, workspace, workspace_mode, agents, lead_agent_id, session_mode, agents_version, created_at, updated_at, project_id, folder_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO teams (id, user_id, name, workspace, workspace_mode, agents, lead_agent_id, session_mode, agents_version, created_at, updated_at, project_id, folder_id, source, source_ref) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.user_id)
@@ -39,6 +39,8 @@ impl ITeamRepository for SqliteTeamRepository {
         .bind(row.updated_at)
         .bind(&row.project_id)
         .bind(&row.folder_id)
+        .bind(&row.source)
+        .bind(&row.source_ref)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -70,6 +72,54 @@ impl ITeamRepository for SqliteTeamRepository {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)
+    }
+
+    async fn get_team_by_source_ref(&self, user_id: &str, source_ref: &str) -> Result<Option<TeamRow>, DbError> {
+        Ok(sqlx::query_as::<_, TeamRow>(
+            "SELECT * FROM teams WHERE user_id = ? AND source = 'builtin' AND source_ref = ?",
+        )
+        .bind(user_id)
+        .bind(source_ref)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn restore_builtin_team(&self, user_id: &str, team_id: &str) -> Result<bool, DbError> {
+        let mut tx = self.pool.begin().await?;
+        let restored = sqlx::query(
+            "UPDATE teams SET archived_at = NULL WHERE user_id = ? AND id = ? \
+             AND source = 'builtin' AND archived_at IS NOT NULL",
+        )
+        .bind(user_id)
+        .bind(team_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        if restored {
+            sqlx::query(
+                "UPDATE conversations SET archived_at = NULL \
+                 WHERE user_id = ? AND \
+                 COALESCE(NULLIF(json_extract(extra, '$.team_id'), ''), NULLIF(json_extract(extra, '$.teamId'), '')) = ?",
+            )
+            .bind(user_id)
+            .bind(team_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM teams WHERE user_id = ? AND id = ? AND source = 'builtin')",
+            )
+            .bind(user_id)
+            .bind(team_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !exists {
+                return Err(DbError::NotFound(format!("team {team_id}")));
+            }
+        }
+        tx.commit().await?;
+        Ok(restored)
     }
 
     async fn get_team_for_restore(&self, team_id: &str) -> Result<Option<TeamRow>, DbError> {

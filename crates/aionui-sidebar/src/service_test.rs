@@ -23,6 +23,106 @@ use crate::ports::{ArchiveTeardownPorts, RemoveProjectPorts};
 const USER: &str = "user-1";
 const OTHER: &str = "user-2";
 
+async fn mark_builtin(pool: &SqlitePool, team_id: &str) {
+    sqlx::query("UPDATE teams SET source = 'builtin', source_ref = ? WHERE id = ?")
+        .bind(team_id)
+        .bind(team_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn builtin_team_archive_and_member_archive_are_read_only_but_pin_works() {
+    let fx = fixture().await;
+    insert_team(fx.pool(), USER, "builtin", "/repo", None, 100).await;
+    insert_member(fx.pool(), USER, "member", "builtin", 100).await;
+    mark_builtin(fx.pool(), "builtin").await;
+    fx.service.pin(USER, "pinned", "team", "builtin").await.unwrap();
+
+    assert!(matches!(
+        fx.service.archive_team(USER, "builtin").await,
+        Err(SidebarError::BuiltinTeamImmutable)
+    ));
+    assert!(matches!(
+        fx.service.archive_conversation(USER, "member").await,
+        Err(SidebarError::BuiltinTeamImmutable)
+    ));
+    assert!(matches!(
+        fx.service.archive_team(OTHER, "builtin").await,
+        Err(SidebarError::ScopeGone)
+    ));
+    let archived: Option<i64> = sqlx::query_scalar("SELECT archived_at FROM conversations WHERE id = 'member'")
+        .fetch_one(fx.pool())
+        .await
+        .unwrap();
+    assert_eq!(archived, None);
+    assert_eq!(user_order_count(fx.pool(), USER, "builtin").await, 1);
+    let response = fx
+        .service
+        .first_screen(USER, None, &[], ArchiveScope::Active)
+        .await
+        .unwrap();
+    let json = serde_json::to_value(response).unwrap();
+    assert!(json.to_string().contains("\"is_builtin\":true"));
+}
+
+#[tokio::test]
+async fn builtin_team_blocks_project_archive_and_removal_before_any_writes() {
+    let fx = fixture().await;
+    let workspace = fx._tmp.path().to_string_lossy().into_owned();
+    insert_std_project(
+        fx.pool(),
+        USER,
+        "project",
+        "Project",
+        &canon_of(&workspace),
+        &file_uri(&workspace),
+    )
+    .await;
+    insert_team(fx.pool(), USER, "builtin", &workspace, Some("project"), 100).await;
+    insert_conv(fx.pool(), USER, "independent", Some("project"), "{}", 100).await;
+    mark_builtin(fx.pool(), "builtin").await;
+    assert!(matches!(
+        fx.service.archive_project(USER, "project").await,
+        Err(SidebarError::BuiltinTeamImmutable)
+    ));
+    assert!(matches!(
+        fx.service.remove_project(USER, "project", false).await,
+        Err(SidebarError::BuiltinTeamImmutable)
+    ));
+    let archived: Option<i64> = sqlx::query_scalar("SELECT archived_at FROM conversations WHERE id = 'independent'")
+        .fetch_one(fx.pool())
+        .await
+        .unwrap();
+    assert_eq!(archived, None);
+    assert!(conv_exists(fx.pool(), "independent").await);
+}
+
+#[tokio::test]
+async fn empty_archive_preserves_builtin_teams_and_members() {
+    let fx = fixture().await;
+    insert_team(fx.pool(), USER, "builtin", "/repo", None, 100).await;
+    insert_member(fx.pool(), USER, "member", "builtin", 100).await;
+    mark_builtin(fx.pool(), "builtin").await;
+    // Seed a legacy archived built-in team via the storage restoration API.
+    let store = SqliteSidebarStore::new(fx.pool().clone());
+    store.set_team_archived(USER, "builtin", Some(100)).await.unwrap();
+    insert_conv(fx.pool(), USER, "custom", None, "{}", 100).await;
+    fx.service.archive_conversation(USER, "custom").await.unwrap();
+    fx.service
+        .set_remove_project_ports(FakePorts::new(fx.pool().clone(), uo_store(fx.pool()), &[]));
+    assert!(matches!(
+        fx.service.delete_archived_team(USER, "builtin").await,
+        Err(SidebarError::BuiltinTeamImmutable)
+    ));
+    let result = fx.service.delete_all_archived(USER).await.unwrap();
+    assert_eq!(result.teams_deleted, 0);
+    assert_eq!(result.conversations_deleted, 1);
+    assert!(conv_exists(fx.pool(), "member").await);
+    assert!(!conv_exists(fx.pool(), "custom").await);
+}
+
 // -- Fixture -----------------------------------------------------------------
 
 struct Fixture {

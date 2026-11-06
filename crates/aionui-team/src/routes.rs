@@ -43,6 +43,12 @@ fn db_error_to_api_error(err: DbError) -> ApiError {
 impl From<TeamError> for ApiError {
     fn from(err: TeamError) -> Self {
         match err {
+            TeamError::BuiltinTeamImmutable => ApiError::coded(
+                StatusCode::FORBIDDEN,
+                "BUILTIN_TEAM_IMMUTABLE",
+                "Built-in teams are read-only and cannot be modified",
+                None,
+            ),
             TeamError::TeamNotFound(msg) => ApiError::NotFound(msg),
             TeamError::AgentNotFound(msg) => ApiError::NotFound(msg),
             TeamError::TaskNotFound(msg) => ApiError::NotFound(msg),

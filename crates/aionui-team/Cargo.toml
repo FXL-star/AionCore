@@ -21,6 +21,7 @@ tracing.workspace = true
 async-trait.workspace = true
 dashmap.workspace = true
 regex.workspace = true
+include_dir.workspace = true
 agent-client-protocol = "2.0.0"
 futures-util.workspace = true
 

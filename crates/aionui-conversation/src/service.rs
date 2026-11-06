@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use aionui_ai_agent::session_context::{AgentSessionContext, AgentSessionKind};
 use aionui_ai_agent::types::BuildTaskOptions;
@@ -39,7 +39,7 @@ use aionui_db::models::{
 use aionui_db::{
     AgentBindingResolution, ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, IAcpSessionRepository,
     IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
-    IAssistantPreferenceRepository, IConversationRepository, IMcpServerRepository, IProviderRepository,
+    IAssistantPreferenceRepository, IConversationRepository, IMcpServerRepository, IProviderRepository, ISidebarStore,
     MessagePageCursor, MessagePageDirection, MessagePageParams, SaveRuntimeStateParams,
     UpsertConversationAssistantSnapshotParams, resolve_agent_binding_from_rows,
 };
@@ -316,6 +316,7 @@ pub struct ConversationService {
     broadcaster: Arc<dyn EventBroadcaster>,
     skill_resolver: Arc<dyn SkillResolver>,
     task_manager: Arc<dyn IWorkerTaskManager>,
+    team_readonly_store: Arc<OnceLock<Arc<dyn ISidebarStore>>>,
     /// Hooks invoked during `delete()` before the DB row is removed so other services
     /// (`WorkerTaskManagerImpl`, `CronService`, …) can clean up their
     /// per-conversation state. Wrapped in `Arc<RwLock<…>>` so registration
@@ -411,6 +412,7 @@ impl ConversationService {
             broadcaster,
             skill_resolver,
             task_manager,
+            team_readonly_store: Arc::new(OnceLock::new()),
             delete_hooks: Arc::new(RwLock::new(Vec::new())),
             turn_cancelled_hooks: Arc::new(RwLock::new(Vec::new())),
             mcp_server_repo: Arc::new(RwLock::new(None)),
@@ -436,6 +438,56 @@ impl ConversationService {
     pub fn with_runtime_state(mut self, runtime_state: Arc<ConversationRuntimeStateService>) -> Self {
         self.runtime_state = runtime_state;
         self
+    }
+
+    /// Install the user-scoped team origin lookup before exposing API operations.
+    pub fn with_team_readonly_store(&self, store: Arc<dyn ISidebarStore>) {
+        let _ = self.team_readonly_store.set(store);
+    }
+
+    pub(crate) async fn ensure_team_member_mutable(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        operation: &str,
+    ) -> Result<(), ConversationError> {
+        if let Some(store) = self.team_readonly_store.get()
+            && store
+                .conversation_team_source(user_id, conversation_id)
+                .await?
+                .as_deref()
+                == Some("builtin")
+        {
+            warn!(
+                conversation_id,
+                operation, "Rejected mutation of a built-in team member"
+            );
+            return Err(ConversationError::BuiltinTeamImmutable);
+        }
+        Ok(())
+    }
+
+    async fn ensure_team_reference_mutable(
+        &self,
+        user_id: &str,
+        extra: &serde_json::Value,
+    ) -> Result<(), ConversationError> {
+        let Some(store) = self.team_readonly_store.get() else {
+            return Ok(());
+        };
+        for key in ["team_id", "teamId"] {
+            if let Some(team_id) = extra.get(key).and_then(serde_json::Value::as_str)
+                && store.team_source(user_id, team_id).await?.as_deref() == Some("builtin")
+            {
+                warn!(
+                    team_id,
+                    operation = "attach_member",
+                    "Rejected mutation of a built-in team"
+                );
+                return Err(ConversationError::BuiltinTeamImmutable);
+            }
+        }
+        Ok(())
     }
 
     pub fn with_runtime_helper_context(mut self, helper_bin: String, base_url: String) -> Self {
@@ -1040,6 +1092,7 @@ impl ConversationService {
         user_id: &str,
         req: CreateConversationRequest,
     ) -> Result<ConversationResponse, ConversationError> {
+        self.ensure_team_reference_mutable(user_id, &req.extra).await?;
         let id = generate_short_id();
         let now = now_ms();
         let source = req.source.unwrap_or(ConversationSource::Aionui);
@@ -2283,6 +2336,13 @@ impl ConversationService {
             .await?
             .ok_or_else(|| ConversationError::NotFound { id: id.to_owned() })?;
 
+        if req.name.is_some() || req.model.is_some() || req.extra.is_some() {
+            self.ensure_team_member_mutable(user_id, id, "update").await?;
+        }
+        if let Some(extra) = &req.extra {
+            self.ensure_team_reference_mutable(user_id, extra).await?;
+        }
+
         let existing_type: AgentType = string_to_enum(&existing.r#type)?;
 
         // Snapshot invariant: once written at create time, `extra.skills`
@@ -2581,6 +2641,8 @@ impl ConversationService {
             .get(user_id, id)
             .await?
             .ok_or_else(|| ConversationError::NotFound { id: id.to_owned() })?;
+
+        self.ensure_team_member_mutable(user_id, id, "delete").await?;
 
         let source: Option<ConversationSource> = existing
             .source

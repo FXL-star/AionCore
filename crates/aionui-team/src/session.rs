@@ -1844,6 +1844,10 @@ impl TeamSession {
     /// into the new mailbox so the first wake reaches the spawned teammate
     /// with its role prompt.
     pub async fn spawn_agent(&self, caller_slot_id: &str, req: SpawnAgentRequest) -> Result<TeamAgent, TeamError> {
+        if self.team.is_builtin() {
+            warn!(team_id = %self.team.id, operation = "spawn_agent", "Rejected modification of built-in team");
+            return Err(TeamError::BuiltinTeamImmutable);
+        }
         // Step 1: caller must be a Lead. MCP dispatch already gates by role,
         // but this method is exposed on TeamSession so every entry point
         // (including future direct service callers) re-checks.
@@ -2724,6 +2728,7 @@ mod tests {
 
     fn make_team() -> Team {
         Team {
+            source: "user".into(),
             id: "t1".into(),
             name: "Test Team".into(),
             workspace: "/tmp/test-team".into(),

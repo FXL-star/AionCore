@@ -38,6 +38,16 @@ impl MockTeamRepo {
 
 #[async_trait::async_trait]
 impl ITeamRepository for MockTeamRepo {
+    async fn get_team_by_source_ref(
+        &self,
+        _user_id: &str,
+        _source_ref: &str,
+    ) -> Result<Option<aionui_db::models::TeamRow>, DbError> {
+        Ok(None)
+    }
+    async fn restore_builtin_team(&self, _user_id: &str, _team_id: &str) -> Result<bool, DbError> {
+        Ok(false)
+    }
     // ── Team CRUD (stubs) ───────────────────────────────────────────
 
     async fn create_team(&self, _row: &TeamRow) -> Result<(), DbError> {
@@ -54,6 +64,8 @@ impl ITeamRepository for MockTeamRepo {
     }
     async fn get_team_for_restore(&self, _id: &str) -> Result<Option<TeamRow>, DbError> {
         Ok(Some(TeamRow {
+            source: "user".into(),
+            source_ref: None,
             id: _id.to_owned(),
             user_id: "system_default_user".to_owned(),
             name: "mock".to_owned(),
@@ -628,6 +640,30 @@ pub(crate) mod workspace_harness {
 
     #[async_trait]
     impl ITeamRepository for FullMockTeamRepo {
+        async fn get_team_by_source_ref(
+            &self,
+            user_id: &str,
+            source_ref: &str,
+        ) -> Result<Option<aionui_db::models::TeamRow>, DbError> {
+            Ok(self
+                .teams
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|team| {
+                    team.user_id == user_id
+                        && team.source == "builtin"
+                        && team.source_ref.as_deref() == Some(source_ref)
+                })
+                .cloned())
+        }
+        async fn restore_builtin_team(&self, user_id: &str, team_id: &str) -> Result<bool, DbError> {
+            self.get_team(user_id, team_id)
+                .await?
+                .filter(|team| team.source == "builtin")
+                .ok_or_else(|| DbError::NotFound(team_id.to_owned()))?;
+            Ok(false)
+        }
         async fn create_team(&self, row: &TeamRow) -> Result<(), DbError> {
             self.teams.lock().unwrap().push(row.clone());
             Ok(())

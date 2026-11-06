@@ -59,7 +59,7 @@
     {
       "id": "ppt-creator",
       "sort_order": 20,
-      "default_enabled": false,
+      "default_enabled": true,
       "name": "PPT Creator",
       "name_i18n": {
         "en-US": "PPT Creator",
@@ -114,7 +114,7 @@
     {
       "id": "excel-creator",
       "sort_order": 30,
-      "default_enabled": false,
+      "default_enabled": true,
       "name": "Excel Creator",
       "name_i18n": {
         "en-US": "Excel Creator",

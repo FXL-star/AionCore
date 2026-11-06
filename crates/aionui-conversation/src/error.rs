@@ -32,6 +32,9 @@ pub enum ConversationError {
     #[error("Forbidden: {reason}")]
     Forbidden { reason: String },
 
+    #[error("built-in teams are read-only and cannot be modified")]
+    BuiltinTeamImmutable,
+
     #[error("Not found: {reason}")]
     NotFoundReason { reason: String },
 
@@ -113,6 +116,7 @@ impl ConversationError {
             Self::BadRequest { reason } => AgentError::bad_request(reason.clone()),
             Self::Busy { reason } => AgentError::conflict(reason.clone()),
             Self::Forbidden { reason } => AgentError::forbidden(reason.clone()),
+            Self::BuiltinTeamImmutable => AgentError::forbidden(self.to_string()),
             Self::NotFoundReason { reason } => AgentError::not_found(reason.clone()),
             Self::Unauthorized { reason } => AgentError::unauthorized(reason.clone()),
             Self::RateLimited => AgentError::RateLimited,
@@ -149,6 +153,7 @@ impl ConversationError {
             Self::BadRequest { .. } => "BAD_REQUEST",
             Self::Unauthorized { .. } => "UNAUTHORIZED",
             Self::Forbidden { .. } => "FORBIDDEN",
+            Self::BuiltinTeamImmutable => "BUILTIN_TEAM_IMMUTABLE",
             Self::Busy { .. } => "CONFLICT",
             Self::RateLimited => "RATE_LIMITED",
             Self::Internal { .. } | Self::Acp(_) => "INTERNAL_ERROR",

@@ -236,6 +236,8 @@ impl TeamSessionService {
     /// (`TeamSession::spawn_agent`) wire that up separately so a slow
     /// `warmup` never stalls other spawns against the same team.
     pub(crate) async fn persist_spawned_agent(&self, req: PersistSpawnedAgentRequest) -> Result<TeamAgent, TeamError> {
+        self.ensure_team_mutable(&req.user_id, &req.team_id, "spawn_agent")
+            .await?;
         let lock = self
             .add_agent_locks
             .entry(req.team_id.clone())

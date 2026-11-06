@@ -77,6 +77,8 @@ fn team_agent(slot_id: &str, name: &str, role: TeammateRole, conversation_id: &s
 async fn insert_team(services: &aionui_app::AppServices, user_id: &str, team_id: &str, agents: Vec<TeamAgent>) {
     let repo = SqliteTeamRepository::new(services.database.pool().clone());
     repo.create_team(&TeamRow {
+        source: "user".into(),
+        source_ref: None,
         id: team_id.to_owned(),
         user_id: user_id.to_owned(),
         name: "Lease Team".to_owned(),

@@ -1020,6 +1020,7 @@ dependencies = [
  "axum",
  "dashmap",
  "futures-util",
+ "include_dir",
  "regex",
  "reqwest",
  "serde",

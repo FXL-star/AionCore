@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 pub struct TeamRow {
     pub id: String,
     pub user_id: String,
+    /// Definition origin: `user` or `builtin`.
+    pub source: String,
+    /// Stable built-in manifest identity, scoped to the owning user.
+    pub source_ref: Option<String>,
     pub name: String,
     pub workspace: String,
     pub workspace_mode: String,
@@ -77,6 +81,8 @@ mod tests {
         let row = TeamRow {
             id: "t1".into(),
             user_id: "system_default_user".into(),
+            source: "user".into(),
+            source_ref: None,
             name: "Team".into(),
             workspace: "/tmp/ws".into(),
             workspace_mode: "shared".into(),

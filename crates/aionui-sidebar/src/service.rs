@@ -112,6 +112,7 @@ impl SidebarService {
     /// pinned row (D6 — an archived item is never pinned). A missing / foreign id
     /// is `ScopeGone` (404); the flip is otherwise idempotent for the slice.
     pub async fn archive_conversation(&self, user_id: &str, id: &str) -> Result<(), SidebarError> {
+        self.ensure_conversation_mutable(user_id, id).await?;
         if !self
             .sidebar
             .set_conversation_archived(user_id, id, Some(now_ms()))
@@ -139,6 +140,7 @@ impl SidebarService {
     /// conversations so the folded unit stays in one slice; the team's own pinned
     /// row is then dropped (D6). Missing team → `ScopeGone`.
     pub async fn archive_team(&self, user_id: &str, id: &str) -> Result<(), SidebarError> {
+        self.ensure_team_mutable(user_id, id).await?;
         if !self.sidebar.set_team_archived(user_id, id, Some(now_ms())).await? {
             return Err(SidebarError::ScopeGone);
         }
@@ -146,6 +148,24 @@ impl SidebarService {
         // runtime and member agents the same way delete does (best-effort).
         self.stop_team_best_effort(user_id, id).await;
         self.unpin_item(user_id, OrderItemType::Team, id).await
+    }
+
+    async fn ensure_team_mutable(&self, user_id: &str, id: &str) -> Result<(), SidebarError> {
+        match self.sidebar.team_source(user_id, id).await?.as_deref() {
+            None => Err(SidebarError::ScopeGone),
+            Some("builtin") => {
+                tracing::warn!(team_id = %id, "sidebar: rejected built-in team mutation");
+                Err(SidebarError::BuiltinTeamImmutable)
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
+    async fn ensure_conversation_mutable(&self, user_id: &str, id: &str) -> Result<(), SidebarError> {
+        if self.sidebar.conversation_team_source(user_id, id).await?.as_deref() == Some("builtin") {
+            return Err(SidebarError::BuiltinTeamImmutable);
+        }
+        Ok(())
     }
 
     /// Unarchive a team (the store cascades its members back). Missing team →
@@ -330,6 +350,10 @@ impl SidebarService {
         let (member_teams, member_convs) = self
             .collect_project_units(user_id, project_id, ArchiveScope::Active)
             .await?;
+        ensure_mutable_teams(&member_teams)?;
+        for conv in &member_convs {
+            self.ensure_conversation_mutable(user_id, &conv.id).await?;
+        }
         let team_ids: Vec<String> = member_teams.iter().map(|t| t.id.clone()).collect();
         let conv_ids: Vec<String> = member_convs.iter().map(|c| c.id.clone()).collect();
 
@@ -426,6 +450,10 @@ impl SidebarService {
         let (teams, convs) = self
             .collect_project_units(user_id, project_id, ArchiveScope::Active)
             .await?;
+        ensure_mutable_teams(&teams)?;
+        for conv in &convs {
+            self.ensure_conversation_mutable(user_id, &conv.id).await?;
+        }
         let now = now_ms();
 
         for team in &teams {
@@ -523,6 +551,9 @@ impl SidebarService {
 
         let mut teams_deleted = 0i64;
         for team in &teams {
+            if team.is_builtin {
+                continue;
+            }
             match ports.remove_team(user_id, &team.id).await {
                 Ok(()) => teams_deleted += 1,
                 Err(err) => {
@@ -579,6 +610,7 @@ impl SidebarService {
         let (team_by_id, independents) = aggregate_teams(convs, teams.clone());
         let team_ids: Vec<&str> = teams
             .iter()
+            .filter(|t| !t.is_builtin)
             .filter(|t| team_by_id.contains_key(&t.id))
             .map(|t| t.id.as_str())
             .collect();
@@ -598,6 +630,9 @@ impl SidebarService {
 
         let mut conversations_deleted = 0i64;
         for conv in &independents {
+            if self.ensure_conversation_mutable(user_id, &conv.id).await.is_err() {
+                continue;
+            }
             match ports.delete_conversation(user_id, &conv.id).await {
                 Ok(()) => conversations_deleted += 1,
                 Err(err) => {
@@ -622,6 +657,7 @@ impl SidebarService {
     /// team-member id is [`SidebarError::ScopeGone`], so this path can never
     /// reach an active conversation or split a live team.
     pub async fn delete_archived_conversation(&self, user_id: &str, id: &str) -> Result<(), SidebarError> {
+        self.ensure_conversation_mutable(user_id, id).await?;
         let convs = self
             .sidebar
             .list_conversations_thin(user_id, ArchiveScope::Archived)
@@ -649,6 +685,7 @@ impl SidebarService {
     /// archived teams slice — a missing, active, or foreign id is
     /// [`SidebarError::ScopeGone`].
     pub async fn delete_archived_team(&self, user_id: &str, id: &str) -> Result<(), SidebarError> {
+        self.ensure_team_mutable(user_id, id).await?;
         let teams = self.sidebar.list_teams_thin(user_id, ArchiveScope::Archived).await?;
         if !teams.iter().any(|t| t.id == id) {
             return Err(SidebarError::ScopeGone);
@@ -1094,6 +1131,7 @@ struct Snapshot {
 /// A team collapsed into one sidebar row.
 #[derive(Clone)]
 struct TeamAgg {
+    is_builtin: bool,
     team_id: String,
     name: String,
     /// `MAX(updated_at)` over active members, else the team's own `updated_at`.
@@ -1330,6 +1368,14 @@ impl GroupAccum {
 
 // -- Free helpers ------------------------------------------------------------
 
+fn ensure_mutable_teams(teams: &[SidebarTeamThin]) -> Result<(), SidebarError> {
+    if let Some(team) = teams.iter().find(|team| team.is_builtin) {
+        tracing::warn!(team_id = %team.id, "sidebar: rejected project mutation containing a built-in team");
+        return Err(SidebarError::BuiltinTeamImmutable);
+    }
+    Ok(())
+}
+
 /// Fold conversations into their live team; return (team aggregates, independents).
 /// A member whose `team_id` names no live team is an orphan and downgrades to an
 /// independent row (BR-8).
@@ -1356,6 +1402,7 @@ fn aggregate_teams(
         team_by_id.insert(
             team.id.clone(),
             TeamAgg {
+                is_builtin: team.is_builtin,
                 team_id: team.id,
                 name: team.name,
                 updated_at,
@@ -1452,6 +1499,7 @@ fn conversation_item(mut resp: ConversationResponse, pinned: bool) -> SidebarIte
 
 fn team_item(agg: &TeamAgg, pinned: bool) -> SidebarItem {
     SidebarItem::Team(SidebarTeamItem {
+        is_builtin: agg.is_builtin,
         team_id: agg.team_id.clone(),
         name: agg.name.clone(),
         updated_at: agg.updated_at,

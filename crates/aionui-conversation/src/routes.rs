@@ -36,6 +36,12 @@ impl From<ConversationError> for ApiError {
             }
             ConversationError::Busy { reason } => ApiError::Conflict(reason),
             ConversationError::Forbidden { reason } => ApiError::Forbidden(reason),
+            ConversationError::BuiltinTeamImmutable => ApiError::coded(
+                StatusCode::FORBIDDEN,
+                "BUILTIN_TEAM_IMMUTABLE",
+                "built-in teams are read-only and cannot be modified",
+                None,
+            ),
             ConversationError::NotFoundReason { reason } => ApiError::NotFound(reason),
             ConversationError::Unauthorized { reason } => ApiError::Unauthorized(reason),
             ConversationError::RateLimited => ApiError::RateLimited,
@@ -555,6 +561,13 @@ async fn active_count(
 #[cfg(test)]
 mod error_mapping_tests {
     use super::*;
+
+    #[test]
+    fn builtin_team_mutation_maps_to_stable_forbidden_code() {
+        let app = ApiError::from(ConversationError::BuiltinTeamImmutable);
+        assert_eq!(app.status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(app.error_code(), "BUILTIN_TEAM_IMMUTABLE");
+    }
 
     #[test]
     fn conversation_not_found_maps_to_app_not_found() {

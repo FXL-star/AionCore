@@ -19,11 +19,24 @@
 -- (current) and the legacy `assistant_overrides` (kept for backward-compat and
 -- re-synced into overlays on every startup via sync_legacy_overrides_to_new_states).
 -- Resetting only one lets the other clobber it on the next boot.
+
+-- UPDATE assistant_overlays
+-- SET enabled = CASE
+--         WHEN assistant_definition_id IN (
+--             SELECT id FROM assistant_definitions
+--             WHERE source = 'builtin' AND source_ref = 'aionui-assistant'
+--         ) THEN 1
+--         ELSE 0
+--     END,
+--     updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
+-- WHERE assistant_definition_id IN (
+--     SELECT id FROM assistant_definitions WHERE source = 'builtin'
+-- );
 UPDATE assistant_overlays
 SET enabled = CASE
         WHEN assistant_definition_id IN (
             SELECT id FROM assistant_definitions
-            WHERE source = 'builtin' AND source_ref = 'aionui-assistant'
+            WHERE source = 'builtin' AND source_ref IN ('aionui-assistant','ppt-creator','excel-creator')
         ) THEN 1
         ELSE 0
     END,
@@ -33,9 +46,20 @@ WHERE assistant_definition_id IN (
 );
 
 -- Legacy mirror. Its primary key is the assistant_id (== builtin source_ref).
+
+-- UPDATE assistant_overrides
+-- SET enabled = CASE WHEN assistant_id = 'aionui-assistant' THEN 1 ELSE 0 END,
+--     updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
+-- WHERE assistant_id IN (
+--     SELECT assistant_id FROM assistant_definitions WHERE source = 'builtin'
+-- );
 UPDATE assistant_overrides
-SET enabled = CASE WHEN assistant_id = 'aionui-assistant' THEN 1 ELSE 0 END,
-    updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
+SET
+  enabled = CASE
+    WHEN assistant_id IN ('aionui-assistant','ppt-creator','excel-creator') THEN 1
+    ELSE 0
+  END,
+  updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
 WHERE assistant_id IN (
-    SELECT assistant_id FROM assistant_definitions WHERE source = 'builtin'
+  SELECT assistant_id FROM assistant_definitions WHERE source = 'builtin'
 );

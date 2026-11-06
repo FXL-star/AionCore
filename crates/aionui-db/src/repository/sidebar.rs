@@ -60,6 +60,7 @@ pub struct SidebarConversationThin {
 pub struct SidebarTeamThin {
     pub id: String,
     pub name: String,
+    pub is_builtin: bool,
     pub project_id: Option<String>,
     /// `teams.workspace` column; empty string → `None` (no workspace set).
     pub workspace: Option<String>,
@@ -105,6 +106,12 @@ pub trait ISidebarStore: Send + Sync {
 
     /// All teams for a user in the given archive slice, thin.
     async fn list_teams_thin(&self, user_id: &str, scope: ArchiveScope) -> Result<Vec<SidebarTeamThin>, DbError>;
+
+    /// Definition origin for an owned team, including archived rows.
+    async fn team_source(&self, user_id: &str, id: &str) -> Result<Option<String>, DbError>;
+
+    /// Team origin for an owned member conversation whose team has the same owner.
+    async fn conversation_team_source(&self, user_id: &str, id: &str) -> Result<Option<String>, DbError>;
 
     /// Every project owned by the user (standard *and* temp), each joined to its
     /// workspace folder identity. This single enumeration is the service's whole

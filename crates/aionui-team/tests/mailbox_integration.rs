@@ -19,6 +19,8 @@ async fn setup() -> (Mailbox, aionui_db::Database) {
     let repo = Arc::new(SqliteTeamRepository::new(db.pool().clone()));
     for team_id in ["t1", "t2"] {
         repo.create_team(&aionui_db::models::TeamRow {
+            source: "user".into(),
+            source_ref: None,
             id: team_id.to_owned(),
             user_id: "system_default_user".to_owned(),
             name: team_id.to_owned(),

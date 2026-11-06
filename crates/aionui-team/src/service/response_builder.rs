@@ -8,6 +8,7 @@ impl TeamSessionService {
         }
 
         Ok(TeamResponse {
+            is_builtin: team.is_builtin(),
             id: team.id.clone(),
             name: team.name.clone(),
             workspace: team.workspace.clone(),

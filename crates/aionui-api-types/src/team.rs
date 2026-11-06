@@ -588,6 +588,8 @@ pub struct TeamResponse {
     pub id: String,
     pub name: String,
     #[serde(default)]
+    pub is_builtin: bool,
+    #[serde(default)]
     pub workspace: String,
     #[serde(alias = "agents")]
     pub assistants: Vec<TeamAgentResponse>,
@@ -1275,6 +1277,7 @@ mod tests {
         let team = TeamResponse {
             id: "team-1".into(),
             name: "Alpha".into(),
+            is_builtin: false,
             workspace: "/workspace/team-1".into(),
             assistants: vec![TeamAgentResponse {
                 slot_id: "slot-1".into(),
@@ -1314,6 +1317,7 @@ mod tests {
         let team = TeamResponse {
             id: "team-2".into(),
             name: "Beta".into(),
+            is_builtin: false,
             workspace: String::new(),
             assistants: vec![],
             leader_assistant_id: None,
@@ -1323,6 +1327,21 @@ mod tests {
         let json = serde_json::to_value(&team).unwrap();
         assert!(json.get("leader_assistant_id").is_none());
         assert!(json["assistants"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn team_response_builtin_flag_defaults_false_for_older_payloads() {
+        let mut payload = serde_json::json!({
+            "id": "team-1", "name": "Office", "assistants": [], "created_at": 1, "updated_at": 2
+        });
+        let legacy: TeamResponse = serde_json::from_value(payload.clone()).unwrap();
+        assert!(!legacy.is_builtin);
+        for is_builtin in [true, false] {
+            payload["is_builtin"] = serde_json::json!(is_builtin);
+            let team: TeamResponse = serde_json::from_value(payload.clone()).unwrap();
+            assert_eq!(team.is_builtin, is_builtin);
+            assert_eq!(serde_json::to_value(team).unwrap()["is_builtin"], is_builtin);
+        }
     }
 
     // -- E. WebSocket event payloads ------------------------------------------
@@ -1427,6 +1446,7 @@ mod tests {
         let team = TeamResponse {
             id: "team-1".into(),
             name: "Alpha".into(),
+            is_builtin: true,
             workspace: "/workspace/team-1".into(),
             assistants: vec![
                 TeamAgentResponse {

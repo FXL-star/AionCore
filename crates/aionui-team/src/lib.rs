@@ -2,6 +2,7 @@
 
 //! Multi-agent team sessions with role-based prompts, task board, mailbox, and scheduling.
 pub mod activity_mapping;
+pub mod builtin;
 pub mod capability;
 pub mod crash_detection;
 pub mod error;
@@ -31,6 +32,7 @@ mod work_coordinator;
 mod work_source;
 mod workspace;
 
+pub use builtin::{BuiltinTeam, BuiltinTeamRegistry};
 pub use crash_detection::{CrashReason, detect_crash, is_rate_limited};
 pub use error::TeamError;
 pub use events::TeamEventEmitter;

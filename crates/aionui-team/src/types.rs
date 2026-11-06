@@ -155,6 +155,7 @@ impl TeamAgent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Team {
+    pub source: String,
     pub id: String,
     pub name: String,
     pub workspace: String,
@@ -284,9 +285,14 @@ pub struct TeamTask {
 use aionui_db::models::{MailboxMessageRow, TeamRow, TeamTaskRow};
 
 impl Team {
+    pub fn is_builtin(&self) -> bool {
+        self.source == "builtin"
+    }
+
     pub fn from_row(row: &TeamRow) -> Result<Self, serde_json::Error> {
         let agents: Vec<TeamAgent> = serde_json::from_str(&row.agents)?;
         Ok(Self {
+            source: row.source.clone(),
             id: row.id.clone(),
             name: row.name.clone(),
             workspace: row.workspace.clone(),
@@ -299,6 +305,7 @@ impl Team {
 
     pub fn to_response(&self) -> TeamResponse {
         TeamResponse {
+            is_builtin: self.is_builtin(),
             id: self.id.clone(),
             name: self.name.clone(),
             workspace: self.workspace.clone(),
@@ -643,6 +650,8 @@ mod tests {
         }])
         .unwrap();
         let row = TeamRow {
+            source: "user".into(),
+            source_ref: None,
             id: "t1".into(),
             user_id: "system_default_user".into(),
             name: "Alpha".into(),
@@ -667,6 +676,7 @@ mod tests {
     #[test]
     fn team_to_response() {
         let team = Team {
+            source: "user".into(),
             id: "t1".into(),
             name: "Alpha".into(),
             workspace: "/workspace/team".into(),
@@ -699,6 +709,8 @@ mod tests {
     #[test]
     fn team_from_row_invalid_json() {
         let row = TeamRow {
+            source: "user".into(),
+            source_ref: None,
             id: "t1".into(),
             user_id: "system_default_user".into(),
             name: "Bad".into(),

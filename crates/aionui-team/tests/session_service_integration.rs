@@ -351,6 +351,8 @@ struct FakeConversationPorts {
     assistant_mcp_selections: Mutex<HashMap<String, TeamMcpSelection>>,
     /// `(conversation_id, option_id, requested_value)` per `set_config_option`.
     config_option_calls: Mutex<Vec<(String, String, String)>>,
+    fail_create_at: AtomicUsize,
+    create_attempts: AtomicUsize,
     fail_team_temp_create: std::sync::atomic::AtomicBool,
     fail_leader_workspace_patch: std::sync::atomic::AtomicBool,
 }
@@ -372,6 +374,8 @@ impl FakeConversationPorts {
             preset_snapshots: Mutex::new(HashMap::new()),
             assistant_mcp_selections: Mutex::new(HashMap::new()),
             config_option_calls: Mutex::new(Vec::new()),
+            fail_create_at: AtomicUsize::new(0),
+            create_attempts: AtomicUsize::new(0),
             fail_team_temp_create: std::sync::atomic::AtomicBool::new(false),
             fail_leader_workspace_patch: std::sync::atomic::AtomicBool::new(false),
         }
@@ -429,6 +433,10 @@ impl TeamConversationProvisioningPort for FakeConversationPorts {
         &self,
         request: TeamConversationCreateRequest,
     ) -> Result<TeamConversationCreateResult, aionui_team::TeamError> {
+        let attempt = self.create_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_create_at.load(Ordering::SeqCst) == attempt {
+            return Err(TeamError::InvalidRequest("forced conversation create failure".into()));
+        }
         if request.assistant_id.is_some() && request.agent_type.is_some() {
             return Err(aionui_team::TeamError::InvalidRequest(
                 "assistant-backed team conversations must not provide agent_type".into(),
@@ -949,6 +957,28 @@ impl FullMockTeamRepo {
 
 #[async_trait::async_trait]
 impl ITeamRepository for FullMockTeamRepo {
+    async fn get_team_by_source_ref(
+        &self,
+        user_id: &str,
+        source_ref: &str,
+    ) -> Result<Option<aionui_db::models::TeamRow>, DbError> {
+        Ok(self
+            .teams
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|team| {
+                team.user_id == user_id && team.source == "builtin" && team.source_ref.as_deref() == Some(source_ref)
+            })
+            .cloned())
+    }
+    async fn restore_builtin_team(&self, user_id: &str, team_id: &str) -> Result<bool, DbError> {
+        self.get_team(user_id, team_id)
+            .await?
+            .filter(|team| team.source == "builtin")
+            .ok_or_else(|| DbError::NotFound(team_id.to_owned()))?;
+        Ok(false)
+    }
     async fn create_team(&self, row: &aionui_db::models::TeamRow) -> Result<(), DbError> {
         self.teams.lock().unwrap().push(row.clone());
         Ok(())
@@ -2835,6 +2865,8 @@ async fn renew_active_lease_allows_empty_team_without_unrelated_lease() {
     );
     team_repo
         .create_team(&aionui_db::models::TeamRow {
+            source: "user".into(),
+            source_ref: None,
             id: "team-empty".into(),
             user_id: "user1".into(),
             name: "Empty".into(),
@@ -8475,6 +8507,8 @@ async fn agent_triggered_attach_failure_notifies_leader() {
 
 fn activity_team_row(id: &str, user_id: &str) -> aionui_db::models::TeamRow {
     aionui_db::models::TeamRow {
+        source: "user".into(),
+        source_ref: None,
         id: id.into(),
         user_id: user_id.into(),
         name: "Activity Team".into(),
@@ -8742,3 +8776,6 @@ async fn activity_rejects_other_user() {
         .unwrap_err();
     assert!(matches!(err, TeamError::TeamNotFound(_)));
 }
+
+#[path = "common/builtin_teams.rs"]
+mod builtin_teams;

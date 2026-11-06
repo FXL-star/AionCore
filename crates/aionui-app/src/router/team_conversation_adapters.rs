@@ -11,7 +11,7 @@ use aionui_conversation::{
     ConversationService,
 };
 use aionui_db::models::{AgentMetadataRow, MessageRow};
-use aionui_db::{IAgentMetadataRepository, IConversationRepository};
+use aionui_db::{ConversationRowUpdate, IAgentMetadataRepository, IConversationRepository, IProviderRepository};
 use aionui_team::{
     AgentTurnCancellationPort, AgentTurnExecutionError, AgentTurnExecutionPort, AgentTurnOutcome, AgentTurnRequest,
     AgentTurnStarted, AgentTurnStatus, NativeSlashCommandPort, SlashCatalogSource, SlashCommandRecognition,
@@ -30,6 +30,7 @@ pub struct TeamConversationAdapters {
     conversation_service: ConversationService,
     conversation_repo: Arc<dyn IConversationRepository>,
     agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
+    provider_repo: Arc<dyn IProviderRepository>,
     task_manager: Arc<dyn IWorkerTaskManager>,
 }
 
@@ -38,12 +39,14 @@ impl TeamConversationAdapters {
         conversation_service: ConversationService,
         conversation_repo: Arc<dyn IConversationRepository>,
         agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
+        provider_repo: Arc<dyn IProviderRepository>,
         task_manager: Arc<dyn IWorkerTaskManager>,
     ) -> Self {
         Self {
             conversation_service,
             conversation_repo,
             agent_metadata_repo,
+            provider_repo,
             task_manager,
         }
     }
@@ -598,6 +601,47 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
             .map_err(map_conversation_update_error)
     }
 
+    async fn initialize_builtin_model(&self, conversation_id: &str, model: &str) -> Result<(), TeamError> {
+        let user_id = self.require_owner_user_id(conversation_id).await?;
+        let row = self
+            .conversation_repo
+            .get(&user_id, conversation_id)
+            .await?
+            .ok_or_else(|| TeamError::InvalidRequest("conversation no longer exists".to_owned()))?;
+        if row.r#type == "aionrs" {
+            let provider = self
+                .provider_repo
+                .list(&user_id)
+                .await?
+                .into_iter()
+                .find(|provider| {
+                    provider.enabled
+                        && serde_json::from_str::<Vec<String>>(&provider.models)
+                            .is_ok_and(|models| models.iter().any(|candidate| candidate == model))
+                })
+                .ok_or_else(|| TeamError::InvalidRequest("no enabled provider offers the built-in model".to_owned()))?;
+            let model_json = serde_json::to_string(&aionui_common::ProviderWithModel {
+                provider_id: provider.id,
+                model: model.to_owned(),
+                use_model: None,
+            })?;
+            // Aionrs factories consume the canonical column, not the ACP seed
+            // or assistant snapshot. This internal initialization bypasses the
+            // public configuration guard while leaving it enforced for clients.
+            self.conversation_repo
+                .update(
+                    &user_id,
+                    conversation_id,
+                    &ConversationRowUpdate {
+                        model: Some(Some(model_json)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+        self.persist_confirmed_model(conversation_id, model).await
+    }
+
     async fn conversation_model_facts(&self, conversation_id: &str) -> Result<TeamConversationModelFacts, TeamError> {
         let user_id = self.require_owner_user_id(conversation_id).await?;
         let row = self
@@ -764,6 +808,68 @@ fn map_conversation_turn_error(error: ConversationError) -> AgentTurnExecutionEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn late_builtin_model_initialization_writes_the_aionrs_factory_source() {
+        use aionui_db::ITeamRepository;
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::AppConfig {
+            data_dir: tmp.path().to_path_buf(),
+            work_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let services = crate::AppServices::from_config(aionui_db::init_database_memory().await.unwrap(), &config)
+            .await
+            .unwrap();
+        let (_states, _) = crate::build_module_states(&services).await.unwrap();
+        let pool = services.database.pool();
+        let team = aionui_db::SqliteTeamRepository::new(pool.clone())
+            .get_team_by_source_ref("system_default_user", "builtin-office-suite")
+            .await
+            .unwrap()
+            .unwrap();
+        let agents: Vec<aionui_team::types::TeamAgent> = serde_json::from_str(&team.agents).unwrap();
+        let id = &agents[0].conversation_id;
+        let before = services
+            .conversation_repo
+            .get("system_default_user", id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(before.model.is_none());
+        sqlx::query("INSERT INTO providers (id, user_id, platform, name, base_url, api_key_encrypted, models, enabled, created_at, updated_at) VALUES ('late-provider', 'system_default_user', 'openai', 'Late provider', 'https://example.invalid', '', '[\"late-model\"]', 1, 1, 1)")
+            .execute(pool).await.unwrap();
+        let adapters = TeamConversationAdapters::new(
+            services.conversation_service.clone(),
+            services.conversation_repo.clone(),
+            Arc::new(aionui_db::SqliteAgentMetadataRepository::new(pool.clone())),
+            Arc::new(aionui_db::SqliteProviderRepository::new(pool.clone())),
+            services.worker_task_manager.clone(),
+        );
+        adapters.initialize_builtin_model(id, "late-model").await.unwrap();
+        let after = services
+            .conversation_repo
+            .get("system_default_user", id)
+            .await
+            .unwrap()
+            .unwrap();
+        let runtime_model = aionui_conversation::task_options::provider_model_from_conversation_row(&after);
+        assert_eq!(runtime_model.provider_id, "late-provider");
+        assert_eq!(runtime_model.model, "late-model");
+        assert_eq!(
+            services
+                .conversation_service
+                .confirmed_model_id("system_default_user", id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("late-model")
+        );
+        assert!(matches!(
+            services.conversation_service.delete("system_default_user", id).await,
+            Err(ConversationError::BuiltinTeamImmutable)
+        ));
+    }
 
     #[test]
     fn parse_available_command_names_extracts_names() {

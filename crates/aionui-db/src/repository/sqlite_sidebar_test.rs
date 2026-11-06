@@ -329,3 +329,63 @@ async fn empty_inputs_short_circuit() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn builtin_origins_are_exposed_and_user_scoped_including_archived_rows() {
+    let (store, db) = store().await;
+    insert_team(db.pool(), USER, "builtin", "/office", None, 1, Some(10)).await;
+    insert_team(db.pool(), USER, "custom", "/custom", None, 1, None).await;
+    sqlx::query("UPDATE teams SET source = 'builtin', source_ref = 'office' WHERE id = 'builtin'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    for (id, user, extra) in [
+        ("canonical", USER, r#"{"team_id":"builtin"}"#),
+        ("legacy", USER, r#"{"teamId":"builtin"}"#),
+        ("foreign-marker", OTHER_USER, r#"{"team_id":"builtin"}"#),
+        ("custom-member", USER, r#"{"team_id":"custom"}"#),
+    ] {
+        insert_conv(db.pool(), user, id, None, extra, 1, Some(10)).await;
+    }
+
+    assert_eq!(
+        store.team_source(USER, "builtin").await.unwrap().as_deref(),
+        Some("builtin")
+    );
+    assert_eq!(
+        store.team_source(USER, "custom").await.unwrap().as_deref(),
+        Some("user")
+    );
+    assert_eq!(store.team_source(OTHER_USER, "builtin").await.unwrap(), None);
+    assert_eq!(store.team_source(USER, "missing").await.unwrap(), None);
+    for id in ["canonical", "legacy"] {
+        assert_eq!(
+            store.conversation_team_source(USER, id).await.unwrap().as_deref(),
+            Some("builtin")
+        );
+        assert_eq!(store.conversation_team_source(OTHER_USER, id).await.unwrap(), None);
+    }
+    assert_eq!(
+        store
+            .conversation_team_source(OTHER_USER, "foreign-marker")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .conversation_team_source(USER, "custom-member")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("user")
+    );
+    assert_eq!(store.conversation_team_source(USER, "missing").await.unwrap(), None);
+
+    let archived = store.list_teams_thin(USER, ArchiveScope::Archived).await.unwrap();
+    assert_eq!(archived.len(), 1);
+    assert!(archived[0].is_builtin);
+    let active = store.list_teams_thin(USER, ArchiveScope::Active).await.unwrap();
+    assert_eq!(active.len(), 1);
+    assert!(!active[0].is_builtin);
+}

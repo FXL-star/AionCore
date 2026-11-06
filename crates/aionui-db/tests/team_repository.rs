@@ -35,6 +35,8 @@ fn make_team_for_user(id: &str, user_id: &str, name: &str) -> TeamRow {
     TeamRow {
         id: id.into(),
         user_id: user_id.into(),
+        source: "user".into(),
+        source_ref: None,
         name: name.into(),
         workspace: String::new(),
         workspace_mode: "shared".into(),
@@ -49,6 +51,181 @@ fn make_team_for_user(id: &str, user_id: &str, name: &str) -> TeamRow {
         project_id: None,
         folder_id: None,
     }
+}
+
+#[tokio::test]
+async fn legacy_team_inserts_default_to_user_source() {
+    let (repo, db) = repo().await;
+    sqlx::query(
+        "INSERT INTO teams (id, user_id, name, workspace, created_at, updated_at) \
+         VALUES ('legacy', ?, 'Existing team', '/workspace', 1, 2)",
+    )
+    .bind(DEFAULT_USER_ID)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let team = repo.get_team(DEFAULT_USER_ID, "legacy").await.unwrap().unwrap();
+    assert_eq!(team.source, "user");
+    assert_eq!(team.source_ref, None);
+    assert_eq!(team.name, "Existing team");
+    assert_eq!(team.updated_at, 2);
+}
+
+#[tokio::test]
+async fn builtin_source_ref_is_unique_per_user_and_includes_archived_rows() {
+    let (repo, db) = repo().await;
+    let mut builtin = make_team_for_user("built-a", "user-a", "Office");
+    builtin.source = "builtin".into();
+    builtin.source_ref = Some("office".into());
+    repo.create_team(&builtin).await.unwrap();
+    sqlx::query("UPDATE teams SET archived_at = 10 WHERE id = 'built-a'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    assert!(repo.list_teams_by_user("user-a").await.unwrap().is_empty());
+    let archived = repo.get_team_by_source_ref("user-a", "office").await.unwrap().unwrap();
+    assert_eq!(archived.id, "built-a");
+    assert_eq!(archived.source, "builtin");
+    assert!(repo.get_team_by_source_ref("user-b", "office").await.unwrap().is_none());
+
+    builtin.id = "duplicate-a".into();
+    let duplicate = repo.create_team(&builtin).await.unwrap_err();
+    assert!(
+        duplicate.is_unique_violation(),
+        "expected unique source identity: {duplicate}"
+    );
+
+    builtin.id = "built-b".into();
+    builtin.user_id = "user-b".into();
+    repo.create_team(&builtin).await.unwrap();
+    assert_eq!(
+        repo.get_team_by_source_ref("user-b", "office")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "built-b"
+    );
+
+    builtin.id = "user-defined".into();
+    builtin.user_id = "user-c".into();
+    builtin.source = "user".into();
+    repo.create_team(&builtin).await.unwrap();
+    assert!(repo.get_team_by_source_ref("user-c", "office").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn builtin_restore_is_idempotent_and_scopes_the_member_cascade() {
+    let (repo, db) = repo().await;
+    sqlx::query("INSERT INTO users (id, username, password_hash, created_at, updated_at) VALUES ('other-user', 'other-user', 'test-hash', 1, 1)")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let mut team = make_team("builtin", "Office");
+    team.source = "builtin".into();
+    team.source_ref = Some("office".into());
+    repo.create_team(&team).await.unwrap();
+    sqlx::query("UPDATE teams SET archived_at = 10 WHERE id = 'builtin'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    for (id, owner, extra) in [
+        ("canonical", DEFAULT_USER_ID, r#"{"team_id":"builtin"}"#),
+        ("legacy", DEFAULT_USER_ID, r#"{"teamId":"builtin"}"#),
+        ("unrelated", DEFAULT_USER_ID, r#"{"team_id":"another"}"#),
+        ("foreign", "other-user", r#"{"team_id":"builtin"}"#),
+    ] {
+        sqlx::query(
+            "INSERT INTO conversations (id, user_id, name, type, extra, archived_at, created_at, updated_at) \
+             VALUES (?, ?, ?, 'chat', ?, 10, 1, 2)",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(id)
+        .bind(extra)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    assert!(repo.restore_builtin_team(DEFAULT_USER_ID, "builtin").await.unwrap());
+    assert!(!repo.restore_builtin_team(DEFAULT_USER_ID, "builtin").await.unwrap());
+    assert_eq!(repo.list_teams_by_user(DEFAULT_USER_ID).await.unwrap().len(), 1);
+    for id in ["canonical", "legacy", "unrelated", "foreign"] {
+        let archived_at: Option<i64> = sqlx::query_scalar("SELECT archived_at FROM conversations WHERE id = ?")
+            .bind(id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(archived_at, matches!(id, "unrelated" | "foreign").then_some(10), "{id}");
+    }
+}
+
+#[tokio::test]
+async fn builtin_restore_rejects_foreign_missing_and_user_teams() {
+    let (repo, db) = repo().await;
+    let mut builtin = make_team("builtin", "Office");
+    builtin.source = "builtin".into();
+    builtin.source_ref = Some("office".into());
+    repo.create_team(&builtin).await.unwrap();
+    repo.create_team(&make_team("user-team", "Custom")).await.unwrap();
+    sqlx::query("UPDATE teams SET archived_at = 10")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    for (owner, id) in [
+        ("other-user", "builtin"),
+        (DEFAULT_USER_ID, "missing"),
+        (DEFAULT_USER_ID, "user-team"),
+    ] {
+        let err = repo.restore_builtin_team(owner, id).await.unwrap_err();
+        assert!(
+            matches!(&err, DbError::NotFound(record) if record == &format!("team {id}")),
+            "{err}"
+        );
+    }
+    let still_archived: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM teams WHERE archived_at = 10")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(still_archived, 2);
+}
+
+#[tokio::test]
+async fn builtin_restore_rolls_back_the_team_when_member_restore_fails() {
+    let (repo, db) = repo().await;
+    let mut team = make_team("builtin", "Office");
+    team.source = "builtin".into();
+    team.source_ref = Some("office".into());
+    repo.create_team(&team).await.unwrap();
+    sqlx::query("UPDATE teams SET archived_at = 10 WHERE id = 'builtin'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO conversations (id, user_id, name, type, extra, archived_at, created_at, updated_at) \
+         VALUES ('member', ?, 'member', 'chat', '{\"team_id\":\"builtin\"}', 10, 1, 2)",
+    )
+    .bind(DEFAULT_USER_ID)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_member_restore BEFORE UPDATE OF archived_at ON conversations \
+         BEGIN SELECT RAISE(ABORT, 'member restore failed'); END",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let err = repo.restore_builtin_team(DEFAULT_USER_ID, "builtin").await.unwrap_err();
+    assert!(err.to_string().contains("member restore failed"), "{err}");
+    let team_archive: Option<i64> = sqlx::query_scalar("SELECT archived_at FROM teams WHERE id = 'builtin'")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(team_archive, Some(10));
 }
 
 fn make_mailbox_msg(id: &str, team_id: &str, to: &str, from: &str, msg_type: &str) -> MailboxMessageRow {

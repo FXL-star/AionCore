@@ -83,6 +83,16 @@ impl SkillResolver for EmptySkillResolver {
 }
 
 async fn setup() -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn IWorkerTaskManager>) {
+    let (service, broadcaster, task_manager, _) = setup_with_db().await;
+    (service, broadcaster, task_manager)
+}
+
+async fn setup_with_db() -> (
+    ConversationService,
+    Arc<TestBroadcaster>,
+    Arc<dyn IWorkerTaskManager>,
+    aionui_db::Database,
+) {
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
     let broadcaster = Arc::new(TestBroadcaster::new());
@@ -100,7 +110,8 @@ async fn setup() -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn IWorkerT
         agent_metadata_repo,
         acp_session_repo,
     );
-    (svc, broadcaster, task_mgr)
+    svc.with_team_readonly_store(Arc::new(aionui_db::SqliteSidebarStore::new(db.pool().clone())));
+    (svc, broadcaster, task_mgr, db)
 }
 
 const USER_ID: &str = "system_default_user";
@@ -118,6 +129,135 @@ fn make_create_req() -> CreateConversationRequest {
         "extra": { "workspace": workspace }
     }))
     .unwrap()
+}
+
+async fn seed_builtin_member(svc: &ConversationService, db: &aionui_db::Database) -> String {
+    let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO teams (id, user_id, name, workspace, source, source_ref, created_at, updated_at) \
+         VALUES ('builtin-office', ?, 'Office', '', 'builtin', 'office', 1, 1)",
+    )
+    .bind(USER_ID)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    svc.update_extra(USER_ID, &conv.id, json!({ "team_id": "builtin-office" }))
+        .await
+        .unwrap();
+    conv.id
+}
+
+#[tokio::test]
+async fn builtin_members_reject_generic_configuration_and_delete_without_events() {
+    let (svc, broadcaster, task_mgr, db) = setup_with_db().await;
+    let id = seed_builtin_member(&svc, &db).await;
+    let before = svc.conversation_repo().get(USER_ID, &id).await.unwrap().unwrap();
+    broadcaster.take_events();
+
+    for patch in [
+        json!({"name": "Changed"}),
+        json!({"model": {"provider_id": "p2", "model": "changed"}}),
+        json!({"extra": {"workspace": "/changed"}}),
+        json!({"extra": {"preset_assistant_id": "changed"}}),
+        json!({"extra": {"team_id": null, "teamId": null}}),
+        json!({"extra": {"current_mode_id": "changed"}}),
+    ] {
+        let req = serde_json::from_value(patch).unwrap();
+        let err = svc.update(USER_ID, &id, req, &task_mgr).await.unwrap_err();
+        assert!(matches!(err, ConversationError::BuiltinTeamImmutable), "{err}");
+    }
+    for option in ["model", "mode", "thought_level"] {
+        let err = svc
+            .set_config_option(
+                USER_ID,
+                &id,
+                option,
+                aionui_api_types::SetConfigOptionRequest {
+                    value: "changed".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConversationError::BuiltinTeamImmutable), "{err}");
+    }
+    let err = svc.delete(USER_ID, &id).await.unwrap_err();
+    assert!(matches!(err, ConversationError::BuiltinTeamImmutable));
+    let after = svc.conversation_repo().get(USER_ID, &id).await.unwrap().unwrap();
+    assert_eq!(after.name, before.name);
+    assert_eq!(after.model, before.model);
+    assert_eq!(after.extra, before.extra);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert!(broadcaster.take_events().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_member_guards_preserve_ownership_errors_and_allow_runtime_state_and_pin() {
+    let (svc, _, task_mgr, db) = setup_with_db().await;
+    let id = seed_builtin_member(&svc, &db).await;
+    let req = serde_json::from_value(json!({"name": "Changed"})).unwrap();
+    assert!(matches!(
+        svc.update("another-user", &id, req, &task_mgr).await,
+        Err(ConversationError::NotFound { .. })
+    ));
+    assert!(matches!(
+        svc.delete("another-user", &id).await,
+        Err(ConversationError::NotFound { .. })
+    ));
+    assert!(matches!(
+        svc.set_config_option(
+            "another-user",
+            &id,
+            "mode",
+            aionui_api_types::SetConfigOptionRequest {
+                value: "changed".into(),
+            }
+        )
+        .await,
+        Err(ConversationError::NotFound { .. })
+    ));
+    assert!(matches!(
+        svc.delete(USER_ID, "missing").await,
+        Err(ConversationError::NotFound { .. })
+    ));
+
+    let pin = serde_json::from_value(json!({"pinned": true})).unwrap();
+    assert!(svc.update(USER_ID, &id, pin, &task_mgr).await.unwrap().pinned);
+    svc.update_extra(USER_ID, &id, json!({"team_mcp_stdio_config": {"enabled": true}}))
+        .await
+        .unwrap();
+    svc.save_acp_runtime_mode(USER_ID, &id, "auto").await.unwrap();
+    svc.reset(USER_ID, &id).await.unwrap();
+    let row = svc.conversation_repo().get(USER_ID, &id).await.unwrap().unwrap();
+    assert!(row.extra.contains("team_mcp_stdio_config"));
+    assert!(row.extra.contains("builtin-office"));
+}
+
+#[tokio::test]
+async fn cannot_attach_extra_conversations_to_a_builtin_team_through_create_or_patch() {
+    let (svc, broadcaster, task_mgr, db) = setup_with_db().await;
+    seed_builtin_member(&svc, &db).await;
+    let custom = svc.create(USER_ID, make_create_req()).await.unwrap();
+    broadcaster.take_events();
+    for key in ["team_id", "teamId"] {
+        let req = serde_json::from_value(json!({"extra": {key: "builtin-office"}})).unwrap();
+        assert!(matches!(
+            svc.update(USER_ID, &custom.id, req, &task_mgr).await,
+            Err(ConversationError::BuiltinTeamImmutable)
+        ));
+        let mut req = make_create_req();
+        req.extra[key] = json!("builtin-office");
+        assert!(matches!(
+            svc.create(USER_ID, req).await,
+            Err(ConversationError::BuiltinTeamImmutable)
+        ));
+    }
+    assert!(broadcaster.take_events().is_empty());
+    let req = serde_json::from_value(json!({"name": "Custom renamed"})).unwrap();
+    assert_eq!(
+        svc.update(USER_ID, &custom.id, req, &task_mgr).await.unwrap().name,
+        "Custom renamed"
+    );
+    svc.delete(USER_ID, &custom.id).await.unwrap();
 }
 
 // ── T1: Create conversation ────────────────────────────────────────

@@ -232,6 +232,29 @@ impl IUserRepository for SqliteUserRepository {
         // bindings) or reference another root's `user_id` (project explorer).
         // The exhaustiveness of this convention is enforced by the
         // adoption-coverage classification test in aionui-db/tests.
+        // Preserve conflicting built-in teams as a unit, including owned rows
+        // referencing their members. Otherwise OR IGNORE would retain only the
+        // team while moving conversations or scheduled work to another account.
+        let retained_team_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT local_team.id FROM teams local_team JOIN teams target_team \
+             ON target_team.source = 'builtin' AND target_team.source_ref = local_team.source_ref \
+             WHERE local_team.user_id = 'system_default_user' AND local_team.source = 'builtin' \
+             AND target_team.user_id = ?",
+        )
+        .bind(owner_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let retained_conversation_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT c.id FROM conversations c JOIN teams local_team \
+             ON local_team.id = COALESCE(NULLIF(json_extract(c.extra, '$.team_id'), ''), NULLIF(json_extract(c.extra, '$.teamId'), '')) \
+             JOIN teams target_team ON target_team.source = 'builtin' AND target_team.source_ref = local_team.source_ref \
+             WHERE c.user_id = 'system_default_user' AND local_team.user_id = c.user_id \
+             AND local_team.source = 'builtin' AND target_team.user_id = ?",
+        )
+        .bind(owner_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
         let mut moved: u64 = 0;
         for owner_column in ["user_id", "owner_user_id"] {
             let tables: Vec<(String,)> = sqlx::query_as(
@@ -250,13 +273,58 @@ impl IUserRepository for SqliteUserRepository {
             // skips rows that would collide with the new owner's existing rows on
             // per-user PK/UNIQUE tables (e.g. `system_settings.user_id`).
             for (table,) in &tables {
-                let result = sqlx::query(&format!(
-                    "UPDATE OR IGNORE \"{table}\" SET \"{owner_column}\" = ? \
-                     WHERE \"{owner_column}\" = 'system_default_user'"
-                ))
-                .bind(owner_id)
-                .execute(&mut *tx)
-                .await?;
+                let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!(
+                    "UPDATE OR IGNORE \"{table}\" SET \"{owner_column}\" = "
+                ));
+                query.push_bind(owner_id);
+                query.push(format!(" WHERE \"{owner_column}\" = 'system_default_user'"));
+                if !retained_team_ids.is_empty() {
+                    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+                        .bind(table)
+                        .fetch_all(&mut *tx)
+                        .await?;
+                    for (parent_table, reference_column, retained_ids) in [
+                        ("teams", "team_id", &retained_team_ids),
+                        ("conversations", "conversation_id", &retained_conversation_ids),
+                    ] {
+                        let column = if table == parent_table {
+                            "id"
+                        } else if columns.iter().any(|column| column == reference_column) {
+                            reference_column
+                        } else {
+                            continue;
+                        };
+                        if retained_ids.is_empty() {
+                            continue;
+                        }
+                        query.push(format!(" AND (\"{column}\" IS NULL OR \"{column}\" NOT IN ("));
+                        let mut separated = query.separated(", ");
+                        for id in retained_ids {
+                            separated.push_bind(id);
+                        }
+                        query.push("))");
+                    }
+                    if table == "user_order" {
+                        for (item_type, retained_ids) in [
+                            ("team", &retained_team_ids),
+                            ("conversation", &retained_conversation_ids),
+                        ] {
+                            if retained_ids.is_empty() {
+                                continue;
+                            }
+                            query
+                                .push(" AND (item_type != ")
+                                .push_bind(item_type)
+                                .push(" OR item_id NOT IN (");
+                            let mut separated = query.separated(", ");
+                            for id in retained_ids {
+                                separated.push_bind(id);
+                            }
+                            query.push("))");
+                        }
+                    }
+                }
+                let result = query.build().execute(&mut *tx).await?;
                 moved += result.rows_affected();
             }
         }
@@ -977,5 +1045,121 @@ mod tests {
             .unwrap();
         assert_eq!(language, "en-US");
         assert_eq!(conversation_owner(&db, "conv-legacy-4").await, user.id);
+    }
+
+    #[tokio::test]
+    async fn adopt_keeps_conflicting_builtin_team_and_members_under_the_same_owner() {
+        let (repo, db) = setup().await;
+        let user = repo
+            .ensure_external_user(UserType::Aionpro, "ext-builtins", ExternalUserProjection::default())
+            .await
+            .unwrap();
+        for (id, owner, source_ref) in [
+            ("local-office", "system_default_user", "office"),
+            ("existing-office", user.id.as_str(), "office"),
+            ("local-other", "system_default_user", "other"),
+        ] {
+            sqlx::query(
+                "INSERT INTO teams (id, user_id, name, workspace, source, source_ref, created_at, updated_at) \
+                 VALUES (?, ?, ?, '', 'builtin', ?, 1, 1)",
+            )
+            .bind(id)
+            .bind(owner)
+            .bind(id)
+            .bind(source_ref)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        for (id, extra) in [
+            ("keep-canonical", r#"{"team_id":"local-office"}"#),
+            ("keep-legacy", r#"{"teamId":"local-office"}"#),
+            ("move-member", r#"{"team_id":"local-other"}"#),
+            ("move-independent", "{}"),
+        ] {
+            seed_legacy_conversation(&db, id).await;
+            sqlx::query("UPDATE conversations SET extra = ? WHERE id = ?")
+                .bind(extra)
+                .bind(id)
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+
+        sqlx::query(
+            "INSERT INTO assistant_definitions (id, assistant_id, source, owner_type, name, agent_id, rule_resource_type, \
+             default_model_mode, default_permission_mode, default_skills_mode, default_mcps_mode, created_at, updated_at) \
+             VALUES ('shared-office', 'shared-office', 'builtin', 'system', 'Office', 'agent', 'none', 'auto', 'auto', 'auto', 'auto', 1, 1)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversation_assistant_snapshots (conversation_id, assistant_definition_id, assistant_id, assistant_source, \
+             agent_id, default_model_mode, default_permission_mode, default_thought_level_mode, default_skills_mode, default_mcps_mode, created_at, updated_at) \
+             VALUES ('keep-canonical', 'shared-office', 'shared-office', 'builtin', 'agent', 'auto', 'auto', 'auto', 'auto', 'auto', 1, 1)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, type, content, created_at) VALUES ('kept-message', 'keep-canonical', 'user', '{}', 1)")
+            .execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO team_tasks (id, team_id, subject, created_at, updated_at) VALUES ('kept-task', 'local-office', 'Task', 1, 1)")
+            .execute(db.pool()).await.unwrap();
+        for (id, conversation_id) in [("kept-cron", "keep-canonical"), ("moved-cron", "move-independent")] {
+            sqlx::query(
+                "INSERT INTO cron_jobs (id, name, schedule_kind, schedule_value, payload_message, conversation_id, created_by, created_at, updated_at) \
+                 VALUES (?, ?, 'every', '60000', 'message', ?, 'user', 1, 1)",
+            )
+            .bind(id).bind(id).bind(conversation_id).execute(db.pool()).await.unwrap();
+        }
+        for (item_type, item_id) in [("team", "local-office"), ("conversation", "keep-canonical")] {
+            sqlx::query(
+                "INSERT INTO user_order (user_id, scene, item_type, item_id, order_key, created_at, updated_at) \
+                 VALUES ('system_default_user', 'pinned', ?, ?, 1, 1, 1)",
+            )
+            .bind(item_type)
+            .bind(item_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        repo.adopt_system_default_data(&user.id).await.unwrap();
+        for (id, expected_owner) in [
+            ("local-office", "system_default_user"),
+            ("existing-office", user.id.as_str()),
+            ("local-other", user.id.as_str()),
+        ] {
+            let row: (String, String) = sqlx::query_as("SELECT user_id, source FROM teams WHERE id = ?")
+                .bind(id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+            assert_eq!(row, (expected_owner.to_owned(), "builtin".to_owned()), "{id}");
+        }
+        for id in ["keep-canonical", "keep-legacy"] {
+            assert_eq!(conversation_owner(&db, id).await, "system_default_user");
+        }
+        for id in ["move-member", "move-independent"] {
+            assert_eq!(conversation_owner(&db, id).await, user.id);
+        }
+        for sql in [
+            "SELECT c.user_id FROM conversation_assistant_snapshots s JOIN conversations c ON c.id = s.conversation_id WHERE s.conversation_id = 'keep-canonical'",
+            "SELECT c.user_id FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = 'kept-message'",
+            "SELECT t.user_id FROM team_tasks task JOIN teams t ON t.id = task.team_id WHERE task.id = 'kept-task'",
+            "SELECT user_id FROM cron_jobs WHERE id = 'kept-cron'",
+            "SELECT user_id FROM user_order WHERE item_id = 'local-office'",
+            "SELECT user_id FROM user_order WHERE item_id = 'keep-canonical'",
+        ] {
+            let owner: String = sqlx::query_scalar(sql).fetch_one(db.pool()).await.unwrap();
+            assert_eq!(owner, "system_default_user", "{sql}");
+        }
+        let cron_owner: String = sqlx::query_scalar("SELECT user_id FROM cron_jobs WHERE id = 'moved-cron'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(cron_owner, user.id);
+        assert_eq!(repo.adopt_system_default_data(&user.id).await.unwrap(), 0);
     }
 }

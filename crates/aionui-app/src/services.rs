@@ -528,6 +528,9 @@ fn build_conversation_service(deps: ConversationServiceDeps<'_>) -> Conversation
         deps.database.pool().clone(),
     )));
     service.with_provider_repo(Arc::new(SqliteProviderRepository::new(deps.database.pool().clone())));
+    service.with_team_readonly_store(Arc::new(aionui_db::SqliteSidebarStore::new(
+        deps.database.pool().clone(),
+    )));
     if let Some(hook) = deps.task_manager_delete_hook {
         service.with_delete_hook(hook);
     }

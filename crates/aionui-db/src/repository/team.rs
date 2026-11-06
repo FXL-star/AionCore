@@ -63,6 +63,13 @@ pub trait ITeamRepository: Send + Sync {
     /// Returns a single team owned by `user_id`, or `None` if not found.
     async fn get_team(&self, user_id: &str, team_id: &str) -> Result<Option<TeamRow>, DbError>;
 
+    /// Finds a built-in manifest instance owned by `user_id`, including archived teams.
+    async fn get_team_by_source_ref(&self, user_id: &str, source_ref: &str) -> Result<Option<TeamRow>, DbError>;
+
+    /// Restores an archived built-in team and its member conversations atomically.
+    /// Returns whether the archive state changed; absent, foreign, or user teams return `NotFound`.
+    async fn restore_builtin_team(&self, user_id: &str, team_id: &str) -> Result<bool, DbError>;
+
     /// Returns a single team for startup/session restore.
     async fn get_team_for_restore(&self, team_id: &str) -> Result<Option<TeamRow>, DbError>;
 

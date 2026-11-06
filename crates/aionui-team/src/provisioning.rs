@@ -111,6 +111,12 @@ pub trait TeamConversationProvisioningPort: Send + Sync {
             .await
     }
 
+    /// Initialize a model after first-run provider setup. Composition adapters
+    /// also persist the canonical provider/model binding required by runtimes.
+    async fn initialize_builtin_model(&self, conversation_id: &str, model: &str) -> Result<(), TeamError> {
+        self.persist_confirmed_model(conversation_id, model).await
+    }
+
     async fn conversation_model_facts(&self, _conversation_id: &str) -> Result<TeamConversationModelFacts, TeamError> {
         Ok(TeamConversationModelFacts::default())
     }
@@ -232,12 +238,54 @@ impl TeamAgentProvisioner {
         TeamWorkspaceResolver::new(self.repo.clone(), self.conversation_port.clone())
     }
 
+    pub(crate) async fn cleanup_initial_agents(&self, user_id: &str, agents: &[TeamAgent]) {
+        for agent in agents.iter().rev() {
+            self.cleanup_initial_conversation(user_id, &agent.conversation_id).await;
+        }
+    }
+
+    async fn cleanup_initial_conversation(&self, user_id: &str, conversation_id: &str) {
+        if let Err(error) = self
+            .conversation_port
+            .delete_team_conversation(user_id, conversation_id)
+            .await
+        {
+            warn!(conversation_id, error = %error, "Failed to clean up partially provisioned team conversation");
+        }
+    }
+
     pub(crate) async fn provision_initial_agents(
         &self,
         user_id: &str,
         team_id: &str,
         inputs: &[TeamAgentInput],
         shared_workspace: Option<&str>,
+    ) -> Result<InitialProvisioningResult, TeamError> {
+        let mut created_conversation_ids = Vec::new();
+        let result = self
+            .provision_initial_agents_inner(
+                user_id,
+                team_id,
+                inputs,
+                shared_workspace,
+                &mut created_conversation_ids,
+            )
+            .await;
+        if result.is_err() {
+            for conversation_id in created_conversation_ids.iter().rev() {
+                self.cleanup_initial_conversation(user_id, conversation_id).await;
+            }
+        }
+        result
+    }
+
+    async fn provision_initial_agents_inner(
+        &self,
+        user_id: &str,
+        team_id: &str,
+        inputs: &[TeamAgentInput],
+        shared_workspace: Option<&str>,
+        created_conversation_ids: &mut Vec<String>,
     ) -> Result<InitialProvisioningResult, TeamError> {
         if inputs.is_empty() {
             return Err(TeamError::InvalidRequest("at least one agent is required".into()));
@@ -288,6 +336,7 @@ impl TeamAgentProvisioner {
                 Some(&leader_mcp_selection),
             )
             .await?;
+        created_conversation_ids.push(leader_conversation.conversation_id.clone());
 
         let team_workspace = match shared_workspace {
             Some(workspace) => workspace.to_owned(),
@@ -344,6 +393,7 @@ impl TeamAgentProvisioner {
                     Some(&mcp_selection),
                 )
                 .await?;
+            created_conversation_ids.push(conversation.conversation_id.clone());
             agents.push(TeamAgent {
                 slot_id,
                 name: input.name.clone(),
@@ -769,7 +819,7 @@ impl TeamAgentProvisioner {
         };
         let (top_level_model, extra) = if agent_type == AgentType::Aionrs {
             (
-                Some(ProviderWithModel {
+                (!model.trim().is_empty()).then(|| ProviderWithModel {
                     provider_id,
                     model: model.to_owned(),
                     use_model: None,

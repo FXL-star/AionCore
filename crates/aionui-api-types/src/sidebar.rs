@@ -176,6 +176,8 @@ pub struct MoveOrderRequest {
 pub struct SidebarTeamItem {
     pub team_id: String,
     pub name: String,
+    #[serde(default)]
+    pub is_builtin: bool,
     /// `MAX(updated_at)` across active member conversations.
     pub updated_at: i64,
     /// Derived from a `user_order` scene=`pinned` row existing for this team.

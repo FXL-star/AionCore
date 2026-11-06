@@ -12,7 +12,7 @@ mod services;
 pub use config::{AppConfig, IdentityMode, derive_encryption_key};
 pub use router::{
     ChannelOrchestratorComponents, ModuleStates, RouterBuildError, RouterRuntime, build_assistant_state,
-    build_conversation_state, build_extension_states, build_module_states, build_ws_state, create_router,
-    create_router_with_all_state, create_router_with_runtime, create_router_with_states,
+    build_conversation_state, build_extension_states, build_module_states, build_module_states_with_builtin_teams,
+    build_ws_state, create_router, create_router_with_all_state, create_router_with_runtime, create_router_with_states,
 };
 pub use services::AppServices;

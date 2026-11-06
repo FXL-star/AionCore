@@ -8,10 +8,27 @@ use tower::ServiceExt;
 use wiremock::MockServer;
 
 use aionui_ai_agent::{AgentInstance, IAgentTask, IMockAgent, WorkerTaskManagerImpl};
-use aionui_app::{AppConfig, AppServices, build_module_states, create_router, create_router_with_states};
+use aionui_app::{AppConfig, AppServices, create_router_with_states};
 use aionui_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use aionui_file::FileService;
 use aionui_system::VersionCheckService;
+
+// General API fixtures own their seed conversations/teams. The dedicated
+// builtin_team_e2e exercises the production manifest and startup path instead.
+async fn build_module_states(
+    services: &AppServices,
+) -> Result<(aionui_app::ModuleStates, aionui_app::ChannelOrchestratorComponents), aionui_app::RouterBuildError> {
+    aionui_app::build_module_states_with_builtin_teams(
+        services,
+        std::sync::Arc::new(aionui_team::BuiltinTeamRegistry::empty()),
+    )
+    .await
+}
+
+async fn create_router(services: &AppServices) -> Result<axum::Router, aionui_app::RouterBuildError> {
+    let (states, _) = build_module_states(services).await?;
+    Ok(create_router_with_states(services, states))
+}
 
 pub async fn build_app() -> (axum::Router, AppServices) {
     let db = aionui_db::init_database_memory().await.unwrap();

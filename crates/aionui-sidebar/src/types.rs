@@ -37,6 +37,8 @@ pub enum SidebarError {
     /// Maps to 404 so the frontend drops that group.
     #[error("scope no longer exists")]
     ScopeGone,
+    #[error("built-in teams are read-only and cannot be modified")]
+    BuiltinTeamImmutable,
     #[error(transparent)]
     Db(#[from] DbError),
     #[error(transparent)]

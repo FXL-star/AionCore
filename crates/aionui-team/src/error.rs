@@ -4,6 +4,9 @@ use aionui_api_types::TeamContextResetAvailability;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TeamError {
+    #[error("built-in teams are read-only and cannot be modified")]
+    BuiltinTeamImmutable,
+
     #[error("Team not found: {0}")]
     TeamNotFound(String),
 

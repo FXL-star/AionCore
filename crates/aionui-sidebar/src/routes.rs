@@ -397,6 +397,12 @@ impl QueryParams {
 /// (DB / project / unexpected) are logged and flattened so no detail leaks.
 fn to_api_error(err: SidebarError) -> ApiError {
     match err {
+        SidebarError::BuiltinTeamImmutable => ApiError::coded(
+            StatusCode::FORBIDDEN,
+            "BUILTIN_TEAM_IMMUTABLE",
+            "built-in teams are read-only and cannot be modified",
+            None,
+        ),
         SidebarError::BadRequest(msg) => ApiError::coded(StatusCode::BAD_REQUEST, "sidebar_bad_request", msg, None),
         SidebarError::ScopeGone => ApiError::coded(
             StatusCode::NOT_FOUND,

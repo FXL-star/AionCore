@@ -203,6 +203,14 @@ pub struct ChannelOrchestratorComponents {
 pub async fn build_module_states(
     services: &AppServices,
 ) -> Result<(ModuleStates, ChannelOrchestratorComponents), RouterBuildError> {
+    build_module_states_with_builtin_teams(services, Arc::new(aionui_team::BuiltinTeamRegistry::load())).await
+}
+
+/// Build with an explicit manifest, allowing integrations to isolate their seed data.
+pub async fn build_module_states_with_builtin_teams(
+    services: &AppServices,
+    builtin_teams: Arc<aionui_team::BuiltinTeamRegistry>,
+) -> Result<(ModuleStates, ChannelOrchestratorComponents), RouterBuildError> {
     let boot = Instant::now();
     tracing::info!("startup: module state build started");
 
@@ -366,6 +374,30 @@ pub async fn build_module_states(
         .service
         .recover_stale_runtime_state_on_startup()
         .await;
+
+    // Assistants and conversation adapters are ready before team provisioning.
+    // External identities created after startup are covered by list_teams' retry.
+    states.team.service.with_builtin_registry(builtin_teams);
+    let builtin_started = Instant::now();
+    match services.user_repo.list_users().await {
+        Ok(users) => {
+            for user in users {
+                if user.status != aionui_db::models::UserStatus::Active
+                    || (services.identity_mode == IdentityMode::AionPro && user.id == "system_default_user")
+                {
+                    continue;
+                }
+                if let Err(error) = states.team.service.list_teams(&user.id).await {
+                    tracing::warn!(user_id = %user.id, error = %error, "startup: built-in team bootstrap failed");
+                }
+            }
+        }
+        Err(error) => tracing::warn!(error = %error, "startup: built-in team owners unavailable"),
+    }
+    tracing::info!(
+        elapsed_ms = builtin_started.elapsed().as_millis(),
+        "startup: built-in team bootstrap completed"
+    );
 
     Ok((states, channel_components))
 }
@@ -962,6 +994,7 @@ pub fn build_team_state(
         conv_service,
         conv_repo,
         Arc::new(SqliteAgentMetadataRepository::new(services.database.pool().clone())),
+        Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
         services.worker_task_manager.clone(),
     ));
     let conversation_port: Arc<dyn TeamConversationProvisioningPort> = adapters.clone();

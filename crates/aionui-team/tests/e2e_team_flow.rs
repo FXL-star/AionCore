@@ -755,6 +755,7 @@ async fn setup_session_with_turn_recorder_inner(
     let cancellation_port: Arc<dyn AgentTurnCancellationPort> = Arc::new(NoopCancellationPort);
 
     let team = aionui_team::types::Team {
+        source: "user".into(),
         id: "e2e-team".into(),
         name: "E2E Team".into(),
         workspace: "/tmp/e2e-team".into(),
@@ -813,6 +814,7 @@ async fn setup_session_with_runtime_ports(
     }
     let task_manager_dyn: Arc<dyn aionui_ai_agent::IWorkerTaskManager> = task_manager;
     let team = aionui_team::types::Team {
+        source: "user".into(),
         id: "e2e-team".into(),
         name: "E2E Team".into(),
         workspace: "/tmp/e2e-team".into(),
